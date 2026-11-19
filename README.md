@@ -25,6 +25,10 @@ The Windows version has not been tested on a Windows machine yet. If the install
 
 Either installer starts chatwatch at login and opens http://127.0.0.1:7731. On a Mac, the first reading may ask whether `security` can read the "Claude Code-credentials" Keychain item; that is how chatwatch reads your plan's meters (see below). On Linux there is no installer: run `python3 chatwatch.py serve` however you like to keep things running.
 
+## The menu bar app (Mac)
+
+On a Mac the installer also builds a small menu bar app if Xcode's command line tools are installed (`xcode-select --install`; run `mac/build.sh` afterwards if you add them later). It shows a ring and the percentage of the limit you are closest to, and turns red when you are past 90% or when the last hour's pace would reach the limit before it resets. Click it for the same chats and close buttons as the page, without opening a browser. If you have many menu bar icons, a new one can end up hidden behind the notch; hold Command and drag it further right.
+
 ## What you see
 
 At the top, your weekly limit and your 5-hour window, the same percentages `/usage` shows, with the last hour's use drawn as a striped band and a warning if that pace would hit the limit before it resets. Below, one card per open chat, under the same title as its tab: how much of the limit it used in the last hour and the last day, how much context it holds, what its next step will cost, which model it is on and how long it has been idle, with a suggestion when there is one (start fresh, close it, or switch models).

@@ -9,6 +9,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 if [ "$1" = "--uninstall" ]; then
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   rm -f "$PLIST"
+  "$HERE/mac/build.sh" --uninstall 2>/dev/null || true
   echo "chatwatch removed. Its files in ~/.claude (chatwatch-*.json*, handoffs/) are left in place."
   exit 0
 fi
@@ -36,5 +37,10 @@ launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
 sleep 2
 echo "chatwatch is running: http://127.0.0.1:7731"
+if command -v swiftc >/dev/null; then
+  "$HERE/mac/build.sh"
+else
+  echo "For the menu bar app, install Xcode's command line tools (xcode-select --install) and run mac/build.sh."
+fi
 command -v terminal-notifier >/dev/null || echo "Tip: 'brew install terminal-notifier' makes alerts open the page when clicked."
 open "http://127.0.0.1:7731" 2>/dev/null || true

@@ -857,6 +857,12 @@ def serve():
     except OSError:
         sys.exit(f"Port {PORT} is taken. Is chatwatch already running? "
                  f"Open http://127.0.0.1:{PORT}, or set CHATWATCH_PORT to another number.")
+    # the menu bar app reads the key from here (readable by this user only)
+    tok = os.path.join(CLAUDE, "chatwatch-token")
+    with open(tok, "w", encoding="utf-8") as f:
+        f.write(TOKEN)
+    if not WINDOWS:
+        os.chmod(tok, 0o600)
     threading.Thread(target=alert_loop, daemon=True).start()
     print(f"chatwatch on http://127.0.0.1:{PORT}  (pid {os.getpid()})", flush=True)
     srv.serve_forever()
