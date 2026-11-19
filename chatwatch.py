@@ -68,6 +68,14 @@ HOUR_ALERT_USD = 10.0        # the same, in API dollars, until the meter is cali
 IDLE_PILE_HOURS = 3          # chats idle this long...
 IDLE_PILE_COUNT = 10         # ...when at least this many are open
 REALERT_HOURS = 6            # the same alert for the same chat, at most this often
+# Fast-burn alerts, checked every minute
+BURN_WINDOW_MIN = 10         # the pace is measured over this many minutes
+BURN_PCT_H = {"week": float(os.environ.get("CHATWATCH_BURN_WEEK", 1.0)),     # one chat burning faster
+              "five_hour": float(os.environ.get("CHATWATCH_BURN_5H", 15.0))}  # than this, per hour
+BURN_USD_H = 25.0            # the same, in API dollars, until the meter is calibrated
+CTX_JUMP_MIN = 15            # context growth is measured over this many minutes
+CTX_JUMP = 80_000            # ...and alerts past this much growth
+CTX_JUMP_FLOOR = 150_000     # ...once the chat holds at least this much
 
 # Calibration
 CALIB_HOURS = {"week": 48, "five_hour": 10}   # how far back to look for readings
@@ -310,9 +318,10 @@ def chats():
         main_steps = sorted(v for v in mt.steps.values() if not v[5])
         if main_steps:
             last_ts, model, _, _, ctx, _ = main_steps[-1]
-        hour = day = total = 0.0
-        hour_tok = nsteps = 0
-        for t in [mt] + [transcript(p) for p in subs]:
+        hour = day = total = recent = 0.0
+        hour_tok = nsteps = subs_active = 0
+        for i, t in enumerate([mt] + [transcript(p) for p in subs]):
+            active = False
             for ts, _, c, tok, _, _ in t.steps.values():
                 total += c
                 nsteps += 1
@@ -321,6 +330,14 @@ def chats():
                     hour_tok += tok
                 if now - ts < 86400:
                     day += c
+                if now - ts < BURN_WINDOW_MIN * 60:
+                    recent += c
+                    active = True
+            if i > 0 and active:
+                subs_active += 1
+        # how much the context grew over the last CTX_JUMP_MIN minutes
+        before = [v[4] for v in main_steps if v[0] <= now - CTX_JUMP_MIN * 60]
+        ctx_growth = ctx - before[-1] if before else 0
         busy = s.get("status") == "busy"
         idle_min = 0 if busy else max(0, (now - max(last_ts, (s.get("statusUpdatedAt") or 0) / 1000)) / 60)
         ttl_min = 60 if mt.cache_1h else 5
@@ -337,6 +354,9 @@ def chats():
             "hour_usd": round(hour, 4), "hour_tok": hour_tok, "day_usd": round(day, 4),
             "total_usd": round(total, 2), "steps": nsteps, "subagents": len(subs),
             "cache_warm": warm, "cache_min": ttl_min, "wake_usd": round(wake, 4),
+            # usage per hour at the pace of the last BURN_WINDOW_MIN minutes
+            "rate_usd_h": round(recent * 60 / BURN_WINDOW_MIN, 4),
+            "subs_active": subs_active, "ctx_growth": ctx_growth,
             "started": (s.get("startedAt") or 0) / 1000, "entry": s.get("entrypoint", ""),
             "_cmd": s.get("_cmd", ""),
         })
@@ -348,6 +368,7 @@ def chats():
         r["hour_pct"] = round(r["hour_usd"] * k, 4) if k else None
         r["day_pct"] = round(r["day_usd"] * k, 3) if k else None
         r["wake_pct"] = round(r["wake_usd"] * k, 4) if k else None
+        r["rate_pct_h"] = round(r["rate_usd_h"] * k, 3) if k else None
         r["advice"] = advice(r)
     rows.sort(key=lambda r: (-r["hour_usd"], -r["ctx"]))
     return rows
@@ -731,6 +752,56 @@ def close_chat(pid, handoff=True):
 
 
 # ---------------------------------------------------------------- alerts
+NOTIFY_KINDS = ("burn", "jump", "fable")   # the fast ones; the menu bar app adds action buttons
+APP_SEEN = [0.0]                            # last time the menu bar app asked for data
+
+
+def app_active():
+    return time.time() - APP_SEEN[0] < 90
+
+
+def live_alerts(rows):
+    """Chats that need a look right now, snoozed ones left out:
+    [{id, sid, pid, kind, title, text, family, busy, notify}], most urgent first."""
+    st = _read_json(STATE) or {}
+    now = time.time()
+    out = []
+
+    def add(r, kind, text):
+        aid = f"{r['sid']}:{kind}"
+        if st.get("snooze:" + aid, 0) > now:
+            return
+        out.append({"id": aid, "sid": r["sid"], "pid": r["pid"], "kind": kind, "title": r["title"],
+                     "text": text, "family": r["family"], "busy": r["busy"], "notify": kind in NOTIFY_KINDS})
+
+    for r in rows:
+        subs = f", {r['subs_active']} subagents running" if r["subs_active"] else ""
+        if r.get("rate_pct_h") is not None:
+            fast = r["rate_pct_h"] >= BURN_PCT_H.get(r["unit"], 1.0)
+            pace = f"{r['rate_pct_h']:.1f}% of your {unit_label(r['unit'])} per hour"
+        else:
+            fast = r["rate_usd_h"] >= BURN_USD_H
+            pace = f"${r['rate_usd_h']:.0f} an hour at API rates"
+        if fast:
+            add(r, "burn", f"Burning {pace} (last {BURN_WINDOW_MIN} min){subs}.")
+        if r["ctx"] >= CTX_JUMP_FLOOR and r["ctx_growth"] >= CTX_JUMP:
+            add(r, "jump", f"Context grew {r['ctx_growth']//1000}K in {CTX_JUMP_MIN} min, now {r['ctx']//1000}K{subs}.")
+        if r["family"] == "fable" and r["busy"]:
+            add(r, "fable", "Working on Fable, the heaviest model. Switch with /model opus unless it needs Fable.")
+        elif r["family"] == "fable" and r["idle_min"] >= FABLE_IDLE_MIN:
+            add(r, "fable_idle", "Idle on Fable. Its next step is priced as Fable.")
+    order = {"burn": 0, "jump": 1, "fable": 2, "fable_idle": 3}
+    out.sort(key=lambda a: order.get(a["kind"], 9))
+    return out
+
+
+def snooze(aid, hours):
+    st = _read_json(STATE) or {}
+    st["snooze:" + aid] = time.time() + hours * 3600
+    with open(STATE, "w", encoding="utf-8") as f:
+        json.dump(st, f)
+
+
 def check(rows=None, send=True):
     rows = chats() if rows is None else rows
     st = _read_json(STATE) or {}
@@ -740,16 +811,15 @@ def check(rows=None, send=True):
     def due(key):
         return now - st.get(key, 0) > REALERT_HOURS * 3600
 
+    # the fast alerts; the menu bar app delivers these itself, with buttons, while it runs
+    if not app_active():
+        for a in live_alerts(rows):
+            if a["notify"] and due(a["id"]):
+                fresh.append((a["id"], f"{a['title'][:40]}: {a['text']}"))
     for r in rows:
         name = r["title"][:40]
         if r["ctx"] > CTX_ALERT and due(r["sid"] + ":ctx"):
             fresh.append((r["sid"] + ":ctx", f"{name}: {r['ctx']//1000}K context"))
-        if r["family"] == "fable" and not r["busy"] and r["idle_min"] >= FABLE_IDLE_MIN and due(r["sid"] + ":fable"):
-            fresh.append((r["sid"] + ":fable", f"{name}: idle on Fable"))
-        if heavy(r) and due(r["sid"] + ":hour"):
-            used = (f"{r['hour_pct']:.1f}% of the {unit_label(r['unit'])}" if r["hour_pct"] is not None
-                    else f"${r['hour_usd']:.0f}")
-            fresh.append((r["sid"] + ":hour", f"{name}: {used} in the last hour"))
     plan = plan_summary(rows)
     for meter, m in plan["meters"].items():
         if m["full_at"] and m["resets"] and m["full_at"] < m["resets"] and due("pace:" + meter):
@@ -765,7 +835,7 @@ def check(rows=None, send=True):
             st[key] = now
         live = {r["sid"] for r in rows}
         st = {key: v for key, v in st.items()
-              if key == "pile" or key.startswith("pace:") or key.split(":")[0] in live}
+              if key == "pile" or key.startswith(("pace:", "snooze:")) or key.split(":")[0] in live}
         with open(STATE, "w", encoding="utf-8") as f:
             json.dump(st, f)
     return fresh
@@ -799,15 +869,18 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(HERE, "page.html"), encoding="utf-8") as f:
                 return self._send(200, f.read().replace("__TOKEN__", TOKEN), "text/html; charset=utf-8")
         if self.path == "/api/chats":
+            if self.headers.get("X-Chatwatch-App"):
+                APP_SEEN[0] = time.time()
             with _lock:
                 rows = chats()
                 plan = plan_summary(rows)
+                alerts = live_alerts(rows)
             for r in rows:
                 r.pop("_cmd", None)
                 r["job"] = jobs.get(r["pid"])
             done = {pid: j for pid, j in jobs.items() if not any(r["pid"] == pid for r in rows)}
             return self._send(200, json.dumps({
-                "chats": rows, "closed": done, "now": time.time(), "plan": plan,
+                "chats": rows, "closed": done, "now": time.time(), "plan": plan, "alerts": alerts,
                 "thresholds": {"ctx": CTX_ALERT, "hour": HOUR_ALERT_USD, "hour_pct": HOUR_ALERT_PCT}}))
         self._send(404, "{}")
 
@@ -829,6 +902,9 @@ class Handler(BaseHTTPRequestHandler):
             threading.Thread(target=close_chat, args=(pid, bool(body.get("handoff", True))),
                              daemon=True).start()
             return self._send(200, '{"ok":true}')
+        if self.path == "/api/snooze":
+            snooze(str(body.get("id", "")), float(body.get("hours", 1)))
+            return self._send(200, '{"ok":true}')
         if self.path == "/api/open":
             p = os.path.abspath(body.get("path", ""))
             if p.startswith(os.path.abspath(HANDOFFS) + os.sep) and os.path.exists(p):
@@ -839,16 +915,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def alert_loop():
+    n = 0
     while True:
         try:
-            plan_status(force=True)       # one fresh meter reading, kept in the history
-            with _lock:
-                calibrate()
+            if n % 5 == 0:                # every 5 minutes: a fresh meter reading and calibration
+                plan_status(force=True)
+                with _lock:
+                    calibrate()
+            with _lock:                   # every minute: the fast alerts
                 rows = chats()
             check(rows)
         except Exception as e:
             print("alert check failed:", e, file=sys.stderr, flush=True)
-        time.sleep(300)
+        n += 1
+        time.sleep(60)
 
 
 def serve():
