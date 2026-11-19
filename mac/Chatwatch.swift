@@ -57,6 +57,7 @@ struct Payload: Codable {
 
 @MainActor
 final class Model: ObservableObject {
+    static let shared = Model()
     @Published var data: Payload?
     @Published var error: String?
     @Published var updated = Date()
@@ -344,8 +345,40 @@ struct Panel: View {
 
 // MARK: app
 
+/// Opening Chatwatch from Spotlight, Launchpad or Applications shows the panel as a
+/// normal window, so it is reachable even when the menu bar icon is hidden.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var window: NSWindow?
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        // the login item passes --background; a launch by hand shows the window
+        if !CommandLine.arguments.contains("--background") { showWindow() }
+    }
+
+    func applicationShouldHandleReopen(_ app: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showWindow()
+        return false
+    }
+
+    @MainActor func showWindow() {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 400, height: 600),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            w.title = "Chatwatch"
+            w.isReleasedWhenClosed = false
+            w.contentView = NSHostingView(rootView: Panel().environmentObject(Model.shared))
+            w.center()
+            window = w
+        }
+        Model.shared.refresh()
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+}
+
 struct ChatwatchApp: App {
-    @StateObject var model = Model()
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    @StateObject var model = Model.shared
     var body: some Scene {
         MenuBarExtra {
             Panel().environmentObject(model).onAppear { model.refresh() }
@@ -364,6 +397,10 @@ enum Main {
             MainActor.assumeIsolated { snapshot(to: args[i + 1]) }
             return
         }
+        // first run: sit near the clock, where the notch cannot hide the icon
+        // (distance from the right edge of the screen, the way macOS stores it)
+        let key = "NSStatusItem Preferred Position Item-0"
+        if UserDefaults.standard.object(forKey: key) == nil { UserDefaults.standard.set(240.0, forKey: key) }
         ChatwatchApp.main()
     }
 
