@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat usage</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --card: #fff; --ink: #1d1d1b; --muted: #6b6a65; --line: #e6e4dd;
+    --accent: #2f6f4f; --warn: #b4541d; --hot: #a3261c; --fable: #6b3fa0; --sonnet: #2d6a9f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --card: #201f1d; --ink: #ecebe6; --muted: #9a988f; --line: #33322e;
+            --accent: #6cbf92; --warn: #e08a4f; --hot: #ef6b5f; --fable: #b48ae6; --sonnet: #78aee0; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+         background: var(--bg); color: var(--ink); }
+  main { max-width: 1100px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 22px; }
+  .plan { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; margin-bottom: 12px; }
+  .plan .top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .plan .big { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .plan .track { position: relative; height: 10px; background: var(--line); border-radius: 5px; margin: 10px 0 8px; overflow: hidden; }
+  .plan .track i { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent); }
+  .plan .track i.warn { background: var(--warn); } .plan .track i.hot { background: var(--hot); }
+  .plan .track b { position: absolute; top: 0; bottom: 0; background: repeating-linear-gradient(45deg, var(--warn) 0 4px, transparent 4px 8px); opacity: .7; }
+  .plan .line { font-size: 13.5px; color: var(--muted); }
+  .plan .meterblock + .meterblock { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .plan .line.hot { color: var(--hot); font-weight: 600; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 22px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  .stat b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+  .stat span { color: var(--muted); font-size: 12.5px; }
+  .bar-top { display: flex; justify-content: space-between; align-items: center; margin: 0 0 10px; gap: 12px; flex-wrap: wrap; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; background: var(--card); color: var(--muted); padding: 6px 12px; font: inherit; font-size: 13px; cursor: pointer; }
+  .seg button.on { background: var(--ink); color: var(--bg); }
+  .chat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+          margin-bottom: 10px; display: grid; grid-template-columns: 1fr auto; gap: 6px 18px; }
+  .chat.closed { opacity: .5; }
+  .title { font-weight: 600; font-size: 15px; }
+  .meta { color: var(--muted); font-size: 12.5px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .pill { font-size: 11.5px; font-weight: 600; padding: 1px 8px; border-radius: 99px; border: 1px solid currentColor; }
+  .m-fable { color: var(--fable); } .m-opus { color: var(--ink); } .m-sonnet, .m-haiku { color: var(--sonnet); }
+  .working { color: var(--accent); font-weight: 600; }
+  .nums { display: flex; gap: 22px; text-align: right; font-variant-numeric: tabular-nums; grid-row: span 2; align-self: start; }
+  .nums div b { display: block; font-size: 17px; }
+  .nums div span { color: var(--muted); font-size: 11.5px; }
+  .hot { color: var(--hot); } .warn { color: var(--warn); }
+  .meter { height: 4px; background: var(--line); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--accent); }
+  .meter i.warn { background: var(--warn); } .meter i.hot { background: var(--hot); }
+  .advice { grid-column: 1 / -1; margin: 4px 0 0; padding: 0; list-style: none; font-size: 13.5px; }
+  .advice li { padding: 3px 0 3px 12px; border-left: 2px solid var(--warn); margin: 3px 0; }
+  .advice li.model { border-color: var(--fable); }
+  .actions { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; margin-top: 6px; flex-wrap: wrap; }
+  .actions button { font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; cursor: pointer;
+                    border: 1px solid var(--line); background: var(--card); color: var(--ink); }
+  .actions button.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  .actions button:disabled { opacity: .5; cursor: default; }
+  .job { font-size: 13px; color: var(--muted); }
+  .job.error { color: var(--hot); } .job.done { color: var(--accent); }
+  .job a { color: inherit; }
+  .note { color: var(--muted); font-size: 12.5px; margin-top: 26px; max-width: 760px; }
+  dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); max-width: 460px; padding: 20px; }
+  dialog::backdrop { background: rgba(0,0,0,.35); }
+  dialog h2 { font-size: 17px; margin: 0 0 8px; }
+  dialog p { margin: 6px 0; font-size: 14px; }
+  dialog .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+  dialog button { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+  dialog button.primary { background: var(--ink); color: var(--bg); }
+  @media (max-width: 720px) { .stats { grid-template-columns: repeat(2, 1fr); } .chat { grid-template-columns: 1fr; } .nums { grid-row: auto; text-align: left; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Chat usage</h1>
+  <div class="sub" id="sub">Reading your open chats...</div>
+  <div class="plan" id="plan"></div>
+  <div class="stats" id="stats"></div>
+  <div class="sub" id="unitnote"></div>
+  <div class="bar-top">
+    <div class="seg" id="sort">
+      <button data-k="hour" class="on">Last hour</button>
+      <button data-k="ctx">Context</button>
+      <button data-k="idle">Idle longest</button>
+    </div>
+    <div class="meta" id="updated"></div>
+  </div>
+  <div id="list"></div>
+  <p class="note">
+    The percentages are Anthropic's own, the numbers /usage shows. Anthropic does not split them per chat, so each
+    chat's share is an estimate: how far the meter moved divided by how much every chat used over the same time,
+    weighted by model price. Usage on claude.ai or the phone app is not in these transcripts, so it is spread over
+    the chats here. Dollar figures are API-rate equivalents; nothing is billed.
+    <b>Context</b> is what every step re-reads. <b>Next step</b> is the price of the chat's next step: cheap while the
+    prompt cache is warm, about 12 to 20 times more once it has expired (after 5 minutes or an hour, depending on the chat).
+    A model can only be switched inside the chat: type <code>/model sonnet</code> or <code>/model opus</code> there.
+    Close + handoff asks a throwaway copy of the chat for a handoff note (one step, about the wake price),
+    saves it to ~/.claude/handoffs, then stops the chat. A VS Code tab stays open but stops answering; a terminal chat exits.
+  </p>
+</main>
+
+<dialog id="dlg">
+  <h2 id="dlg-title"></h2>
+  <div id="dlg-body"></div>
+  <div class="row">
+    <button id="dlg-cancel">Cancel</button>
+    <button id="dlg-ok" class="primary"></button>
+  </div>
+</dialog>
+
+<script>
+const TOKEN = "__TOKEN__";
+let data = { chats: [], closed: {} }, sortKey = "hour";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const usd = n => n >= 100 ? "$" + n.toFixed(0) : "$" + n.toFixed(2);
+const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : Math.round(n / 1e3) + "K";
+const pct = n => n == null ? "" : n > 0 && n < 0.01 ? "<0.01%" : n < 1 ? n.toFixed(2) + "%" : n.toFixed(1) + "%";
+const when = t => new Date(t * 1000).toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+const idle = m => m < 60 ? m + " min" : (m / 60).toFixed(m < 600 ? 1 : 0) + " h";
+
+async function load() {
+  try {
+    const r = await fetch("/api/chats", { cache: "no-store" });
+    data = await r.json();
+    render();
+  } catch (e) {
+    $("#sub").textContent = "Can't reach chatwatch. Is the server running?";
+  }
+}
+
+function render() {
+  const cs = data.chats, th = data.thresholds;
+  const hour = cs.reduce((a, c) => a + c.hour_usd, 0);
+  const working = cs.filter(c => c.busy).length;
+  const heavy = cs.filter(c => c.ctx > th.ctx).length;
+  const fable = cs.filter(c => c.family === "fable").length;
+  $("#sub").textContent = `${cs.length} open chats, ${working} working right now.`;
+  const p = data.plan || { meters: {} };
+  const cal = !!p.unit;
+  const unitName = cal ? p.meters[p.unit].label : "";
+  const hourPct = cal ? p.meters[p.unit].hour_pct : null;
+  const ms = Object.entries(p.meters || {});
+  $("#plan").innerHTML = !ms.length
+    ? `<div class="line">Plan limits unavailable${p.why ? ": " + esc(p.why) : ""}. Showing API-rate dollars instead.</div>`
+    : ms.map(([key, m]) => {
+        const before = m.full_at && m.resets && m.full_at < m.resets;
+        const cls = m.pct >= 90 ? "hot" : m.pct >= 75 ? "warn" : "";
+        const ahead = m.hour_pct ? Math.min(100 - m.pct, m.hour_pct) : 0;
+        return `<div class="meterblock">
+          <div class="top"><div><span class="big">${m.pct.toFixed(0)}%</span> of your ${esc(m.label)} used</div>
+            <div class="line">${m.resets ? "resets " + when(m.resets) : ""}</div></div>
+          <div class="track"><i class="${cls}" style="width:${m.pct}%"></i><b style="left:${m.pct}%;width:${ahead}%"></b></div>
+          ${m.pct_per_usd ? `<div class="line ${before ? "hot" : ""}">Last hour: ${pct(m.hour_pct)} (striped).
+            ${m.full_at ? (before ? `At that pace you reach the limit ${when(m.full_at)}, before the reset.` : `At that pace it lasts until the reset.`) : ""}</div>
+            <div class="line">1% is about ${usd(1 / m.pct_per_usd)} at API rates, measured from the meter moving ${m.calib_points} points over ${m.calib_hours} h.</div>`
+          : `<div class="line">Per-chat shares start once this meter has moved a few points (usually within a few hours of use).</div>`}
+        </div>`; }).join("");
+  $("#stats").innerHTML = [
+    [cal ? pct(hourPct) : usd(hour), cal ? `of your ${unitName}, last hour` : "used in the last hour, all chats"],
+    [cs.length, "open chats"],
+    [heavy, `holding more than ${k(th.ctx)} of context`],
+    [fable, "on Fable"],
+  ].map(([b, s]) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`).join("");
+  $("#unitnote").textContent = cal ? `Each chat's numbers are shares of your ${unitName}${ms.length > 1 ? ", the limit you are closest to" : ""}.` : "";
+  $("#updated").textContent = "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+  const sorted = [...cs].sort((a, b) =>
+    sortKey === "ctx" ? b.ctx - a.ctx :
+    sortKey === "idle" ? (b.busy ? -1 : b.idle_min) - (a.busy ? -1 : a.idle_min) :
+    (b.hour_usd - a.hour_usd) || (b.ctx - a.ctx));
+  const maxCtx = Math.max(th.ctx * 2, ...cs.map(c => c.ctx));
+  let html = sorted.map(c => {
+    const state = c.busy ? `<span class="working">working</span>` : `idle ${idle(c.idle_min)}`;
+    const ctxCls = c.ctx > th.ctx * 1.6 ? "hot" : c.ctx > th.ctx ? "warn" : "";
+    const hourCls = (c.hour_pct != null ? c.hour_pct >= th.hour_pct : c.hour_usd >= th.hour) ? "hot" : "";
+    const job = c.job;
+    const running = job && job.state === "running";
+    const adv = c.advice.map(([kind, t]) => `<li class="${kind}">${esc(t)}</li>`).join("");
+    return `<div class="chat">
+      <div>
+        <div class="title">${esc(c.title)}</div>
+        <div class="meta">
+          <span class="pill m-${c.family}">${esc(c.family || "?")}</span>
+          <span>${esc(c.folder)}</span><span>${state}</span>
+          <span>${c.steps} steps${c.subagents ? `, ${c.subagents} subagents` : ""}</span>
+        </div>
+      </div>
+      <div class="nums">
+        <div><b class="${hourCls}">${cal ? pct(c.hour_pct) : usd(c.hour_usd)}</b><span>${cal ? "last hour" : "last hour"}</span>
+          <span style="display:block">${cal ? usd(c.hour_usd) + ", " : ""}${c.hour_share}% of chats</span></div>
+        <div style="min-width:86px"><b class="${ctxCls}">${k(c.ctx)}</b><span>context</span>
+          <div class="meter"><i class="${ctxCls}" style="width:${Math.min(100, 100 * c.ctx / maxCtx)}%"></i></div></div>
+        <div><b>${cal ? pct(c.wake_pct) : usd(c.wake_usd)}</b><span>next step${c.cache_warm ? "" : ", cache cold"}</span></div>
+        <div><b>${cal ? pct(c.day_pct) : usd(c.day_usd)}</b><span>${cal ? "last 24 h" : "last 24 h"}</span></div>
+      </div>
+      ${adv ? `<ul class="advice">${adv}</ul>` : ""}
+      <div class="actions">
+        <button class="primary" ${running ? "disabled" : ""} onclick="ask(${c.pid}, true)">Close + handoff</button>
+        <button ${running ? "disabled" : ""} onclick="ask(${c.pid}, false)">Close, no handoff</button>
+        ${job ? `<span class="job ${job.state}">${esc(job.msg)}</span>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+  for (const [pid, j] of Object.entries(data.closed || {})) {
+    const link = j.path ? ` <a href="#" onclick="openFile('${esc(j.path)}');return false">Open the handoff</a>` : "";
+    html += `<div class="chat closed"><div class="job ${j.state}">${esc(j.msg)}${link}</div></div>`;
+  }
+  $("#list").innerHTML = html || `<div class="chat">No open chats.</div>`;
+}
+
+function ask(pid, handoff) {
+  const c = data.chats.find(x => x.pid === pid);
+  if (!c) return;
+  $("#dlg-title").textContent = handoff ? "Close with a handoff note?" : "Close without a handoff?";
+  $("#dlg-body").innerHTML =
+    `<p><b>${esc(c.title)}</b> (${esc(c.folder)})</p>` +
+    (handoff ? `<p>A copy of the chat writes a handoff note on ${esc(c.family)}. That is one step, about ${c.wake_pct != null ? pct(c.wake_pct) + " of your " + unitName : usd(c.wake_usd) + " worth"}. Then the chat stops, and the line to start a fresh chat goes on your clipboard.</p>`
+             : `<p>The chat stops now. You can reopen it later with <code>claude --resume</code>.</p>`) +
+    (c.busy ? `<p class="hot">It is working right now. Closing stops it mid-task.</p>` : "");
+  $("#dlg-ok").textContent = handoff ? "Write handoff and close" : "Close it";
+  $("#dlg-ok").onclick = async () => {
+    $("#dlg").close();
+    await fetch("/api/close", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN },
+                                body: JSON.stringify({ pid, handoff }) });
+    load();
+  };
+  $("#dlg").showModal();
+}
+$("#dlg-cancel").onclick = () => $("#dlg").close();
+
+async function openFile(path) {
+  await fetch("/api/open", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN },
+                             body: JSON.stringify({ path }) });
+}
+
+$("#sort").onclick = e => {
+  const b = e.target.closest("button"); if (!b) return;
+  sortKey = b.dataset.k;
+  document.querySelectorAll("#sort button").forEach(x => x.classList.toggle("on", x === b));
+  render();
+};
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>
