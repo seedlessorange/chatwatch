@@ -16,7 +16,8 @@ if [ "$1" = "--uninstall" ]; then
 fi
 
 command -v swiftc >/dev/null || { echo "Needs Xcode's command line tools: run 'xcode-select --install', then this again."; exit 1; }
-mkdir -p "$APP/Contents/MacOS" "$HOME/Library/LaunchAgents"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$HOME/Library/LaunchAgents"
+cp "$HERE/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 swiftc -O -swift-version 5 -parse-as-library -target "$(uname -m)-apple-macos13.0" \
   -o "$APP/Contents/MacOS/Chatwatch" "$HERE/Chatwatch.swift"
 cat > "$APP/Contents/Info.plist" <<P
@@ -26,6 +27,7 @@ cat > "$APP/Contents/Info.plist" <<P
   <key>CFBundleName</key><string>Chatwatch</string>
   <key>CFBundleIdentifier</key><string>com.chatwatch.menubar</string>
   <key>CFBundleExecutable</key><string>Chatwatch</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
@@ -34,6 +36,9 @@ cat > "$APP/Contents/Info.plist" <<P
 </dict></plist>
 P
 codesign --force -s - "$APP" >/dev/null 2>&1 || true
+# tell Finder, Spotlight and notifications about the new icon
+touch "$APP"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP" >/dev/null 2>&1 || true
 
 cat > "$PLIST" <<P
 <?xml version="1.0" encoding="UTF-8"?>
