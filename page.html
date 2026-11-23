@@ -175,11 +175,13 @@ function render() {
     const rate = a.kind === "finished" ? (a.state === "waiting" ? "needs your answer" : "more to do")
       : a.kind === "cold" ? (a.cold_cost_pct != null ? pct(a.cold_cost_pct) : usd(a.cold_cost_usd || 0)) + " to resume cold"
       : a.waste_pct_h != null ? pct(a.waste_pct_h) + " wasted per hour" : usd(a.waste_usd_h || 0) + " wasted per hour";
+    // finished and cold alerts carry their one sentence in both text and reasons
+    const reasons = (a.reasons || []).filter(t => t !== a.text);
     return `<div class="alert ${a.kind}">
       <div class="head"><span>${a.jump ? `<a href="#" onclick="jump('${esc(a.sid)}'); return false" title="Open this chat" style="color:inherit">${esc(a.title)}</a>` : esc(a.title)}</span><span class="rate">${rate}</span></div>
       <div class="line" style="font-size:13.5px">${esc(a.text)}</div>
       ${a.kind === "cold" && a.state && a.state !== "unclear" ? `<div class="line" style="font-size:13.5px"><b>${{done: "Looks finished", waiting: "Waiting on you", loose: "Loose ends"}[a.state]}.</b> Its last reply ends: ${esc(a.closing || "")}</div>` : ""}
-      ${(a.reasons || []).length ? `<ul>${a.reasons.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+      ${reasons.length ? `<ul>${reasons.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
       <div class="actions">${a.kind === "finished" ? `
         ${a.state === "waiting" ? `<button class="primary" onclick="jump('${esc(a.sid)}')">Open the chat</button>`
           : `<button class="${a.handoff_ok ? "" : "primary"}" onclick="continueChat('${esc(a.sid)}')" title="Copies continue, then opens the chat: paste and press Enter">Continue</button>`}
