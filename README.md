@@ -13,7 +13,7 @@ On a Mac, chatwatch lives in the menu bar. In the panel on the right, one chat's
 
 Below that, every open chat is listed with its share of the limit in the last hour, how much of what it uses is waste, and how much context it holds.
 
-The same numbers are on a page in your browser, at http://127.0.0.1:7731, on Windows and Linux too. Both follow your system's light or dark setting. The chats in these pictures are made up.
+On Windows, it sits in the system tray by the clock: a ring with the percentage of the limit you are closest to, red when your pace reaches the limit before it resets, and a dot when a chat needs you. Click it and the panel opens as a small window beside the tray. The same numbers are on a page in your browser, at http://127.0.0.1:7731, on Linux too. Both follow your system's light or dark setting. The chats in these pictures are made up.
 
 <br clear="right">
 
@@ -39,7 +39,7 @@ cd $HOME\chatwatch
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-The Windows version has not been tested on a Windows machine yet. If the installer or the page fails, open an issue with the error text and it will get fixed.
+The Windows version, tray icon included, has not been tested on a Windows machine yet. If the installer, the tray icon or the page fails, open an issue with the error text and it will get fixed. If the icon doesn't show, click the ^ arrow by the clock and drag it onto the taskbar.
 
 Either installer starts chatwatch at login and opens http://127.0.0.1:7731. On a Mac, the first reading may ask whether `security` can read the "Claude Code-credentials" Keychain item; that is how chatwatch reads your plan's meters (see below). On Linux there is no installer: run `python3 chatwatch.py serve` however you like to keep things running.
 
