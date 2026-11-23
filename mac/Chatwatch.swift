@@ -38,11 +38,14 @@ struct Chat: Codable, Identifiable {
     let waste_usd_h: Double?
     let waste: Waste?
     let advice: [[String]]
+    let cause: Cause?
     let job: Job?
     var id: Int { pid }
 }
 
 struct Waste: Codable { let share: Double; let steps: Int }
+struct Cause: Codable, Hashable { let kind: String; let pill: String; let text: String }
+struct Scoped: Codable { let label: String; let pct: Double; let resets: Double? }
 
 struct Meter: Codable {
     let label: String
@@ -64,9 +67,20 @@ struct AlertItem: Codable, Identifiable {
     let reasons: [String]?
     let fix: String?
     let subs_active: Int?
+    let causes: [Cause]?
+    let waste_pct_h: Double?
+    let waste_usd_h: Double?
+    let share: Double?
 }
 
-struct Plan: Codable { let why: String?; let unit: String?; let meters: [String: Meter] }
+struct Plan: Codable {
+    let why: String?
+    let unit: String?
+    let meters: [String: Meter]
+    let plan: String?
+    let scoped: [Scoped]?
+    let session_expected: Bool?
+}
 struct Thresholds: Codable { let ctx: Int }
 struct Payload: Codable {
     let chats: [Chat]
@@ -246,47 +260,116 @@ func labelImage(pct: Double?, warning: Bool, urgent: Int = 0) -> NSImage {
 
 // MARK: panel
 
-struct PaceBar: View {
-    let m: Meter
+// MARK: look
+
+let coral = Color(red: 0.85, green: 0.47, blue: 0.36)
+
+/// "in 2 hr 14 min (Thu, 9:54 PM)"
+func resetsIn(_ t: Double) -> String {
+    let left = max(0, t - Date().timeIntervalSince1970)
+    let rel: String
+    if left < 3600 { rel = "\(Int(left / 60)) min" }
+    else if left < 86400 { rel = "\(Int(left / 3600)) hr \(Int(left.truncatingRemainder(dividingBy: 3600) / 60)) min" }
+    else { let d = Int((left / 86400).rounded()); rel = d == 1 ? "1 day" : "\(d) days" }
+    let f = DateFormatter()
+    f.dateFormat = "EEE, h:mm a"
+    return "Resets in \(rel) (\(f.string(from: Date(timeIntervalSince1970: t))))"
+}
+
+struct IconButton: View {
+    let symbol: String
+    let help: String
+    let action: () -> Void
+    @State private var hover = false
     var body: some View {
-        GeometryReader { g in
-            let w = g.size.width
-            let used = w * CGFloat(min(m.pct, 100) / 100)
-            let ahead = w * CGFloat(min(max(0, 100 - m.pct), m.hour_pct ?? 0) / 100)
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.primary.opacity(0.1))
-                Capsule().fill(m.pct >= 90 ? Color.red : m.pct >= 75 ? Color.orange : Color.green)
-                    .frame(width: used)
-                Rectangle().fill(Color.orange.opacity(0.45)).frame(width: ahead).offset(x: used)
-            }
-            .clipShape(Capsule())
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 13, weight: .medium))
+                .frame(width: 26, height: 24)
+                .background(RoundedRectangle(cornerRadius: 6).fill(hover ? Color.primary.opacity(0.08) : .clear))
         }
-        .frame(height: 6)
+        .buttonStyle(.plain).help(help).onHover { hover = $0 }
     }
 }
 
-struct MeterView: View {
-    let m: Meter
+/// A thin bar; the striped part ahead is the last hour's pace.
+struct MeterBar: View {
+    let pct: Double
+    var ahead: Double = 0
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(String(format: "%.0f%%", m.pct)).font(.system(size: 28, weight: .semibold)).monospacedDigit()
-                Text("of your \(m.label)").foregroundStyle(.secondary)
-                Spacer()
-                if let r = m.resets { Text("resets \(when(r))").font(.caption).foregroundStyle(.secondary) }
+        GeometryReader { g in
+            let w = g.size.width
+            let used = w * CGFloat(min(pct, 100) / 100)
+            ZStack(alignment: .leading) {
+                Capsule().fill(coral.opacity(0.18))
+                Capsule().fill(pct >= 90 ? Color.red : coral).frame(width: max(used, pct > 0 ? 6 : 0))
+                Rectangle().fill(coral.opacity(0.45))
+                    .frame(width: w * CGFloat(min(max(0, 100 - pct), ahead) / 100)).offset(x: used)
             }
-            PaceBar(m: m)
-            if let h = m.hour_pct {
-                let before = (m.full_at ?? .infinity) < (m.resets ?? 0)
-                Text("Last hour \(pct(h))" + (before ? ". At that pace you hit the limit \(when(m.full_at!)), before the reset." : "."))
-                    .font(.caption)
-                    .foregroundStyle(before ? Color.red : Color.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else {
-                Text("Per-chat shares start once this meter has moved a few points.")
-                    .font(.caption).foregroundStyle(.secondary)
+            .clipShape(Capsule())
+        }
+        .frame(height: 7)
+    }
+}
+
+struct MeterBlock: View {
+    let label: String
+    let pct: Double?
+    var rate: Double? = nil
+    var resets: Double? = nil
+    var fullAt: Double? = nil
+    var note: String? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(label).font(.system(size: 12)).foregroundStyle(.secondary)
+                Spacer()
+                if let r = rate { Text(String(format: r < 1 ? "%.2f%%/hr" : "%.1f%%/hr", r)).font(.system(size: 12)).monospacedDigit().foregroundStyle(.secondary) }
+            }
+            Text(pct.map { String(format: "%.0f%%", $0) } ?? "0%").font(.system(size: 24, weight: .bold)).monospacedDigit()
+            MeterBar(pct: pct ?? 0, ahead: rate ?? 0)
+            if let n = note {
+                Text(n).font(.system(size: 11)).foregroundStyle(.secondary)
+            } else if let r = resets {
+                Text(resetsIn(r)).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if let f = fullAt, let r = resets, f < r {
+                Text("At this pace you hit it \(when(f)), before the reset.")
+                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.red)
             }
         }
+    }
+}
+
+struct MetersCard: View {
+    @EnvironmentObject var model: Model
+    let plan: Plan
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if let m = plan.meters["five_hour"] {
+                MeterBlock(label: "Current session", pct: m.pct, rate: m.hour_pct, resets: m.resets, fullAt: m.full_at)
+            } else if plan.session_expected == true {
+                MeterBlock(label: "Current session", pct: nil, note: "Starts with your next message")
+            }
+            if let m = plan.meters["week"] {
+                MeterBlock(label: "Weekly limit", pct: m.pct, rate: m.hour_pct, resets: m.resets, fullAt: m.full_at)
+            }
+            ForEach(plan.scoped ?? [], id: \.label) { sc in
+                MeterBlock(label: sc.label, pct: sc.pct, resets: sc.resets)
+            }
+            if plan.meters.isEmpty {
+                Text("Plan limits unavailable\(plan.why.map { ": " + $0 } ?? ""). Showing API-rate dollars.")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            HStack(spacing: 5) {
+                Image(systemName: "clock")
+                Text(model.updated.formatted(date: .omitted, time: .shortened))
+                Spacer()
+            }
+            .font(.system(size: 11)).foregroundStyle(.tertiary)
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color.primary.opacity(0.05)))
     }
 }
 
@@ -299,11 +382,20 @@ struct Tag: View {
         Text(text)
             .font(.system(size: 10, weight: .semibold))
             .lineLimit(1)
-            .padding(.horizontal, 6).padding(.vertical, 1.5)
-            .background(Capsule().fill(filled ? color.opacity(0.15) : Color.clear))
-            .overlay(Capsule().stroke(color.opacity(filled ? 0 : 0.6), lineWidth: 1))
+            .padding(.horizontal, 6).padding(.vertical, 2)
+            .background(Capsule().fill(filled ? color.opacity(0.16) : Color.clear))
+            .overlay(Capsule().stroke(color.opacity(filled ? 0 : 0.5), lineWidth: 1))
             .foregroundStyle(color)
             .fixedSize()
+    }
+}
+
+func causeColor(_ kind: String) -> Color {
+    switch kind {
+    case "fable": return .purple
+    case "rebuild": return .blue
+    case "jump": return .red
+    default: return .orange
     }
 }
 
@@ -315,106 +407,63 @@ struct Num: View {
     var width: CGFloat = 54
     var body: some View {
         VStack(alignment: .trailing, spacing: 1) {
-            Text(value).font(.system(size: 13, weight: .semibold)).monospacedDigit()
+            Text(value).font(.system(size: 12, weight: .semibold)).monospacedDigit()
                 .foregroundStyle(color).lineLimit(1)
-            Text(caption).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+            Text(caption).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
         }
         .frame(width: width, alignment: .trailing)
     }
 }
 
-struct ChatRow: View {
-    @EnvironmentObject var model: Model
-    let c: Chat
-    let ctxAlert: Int
-    @State private var confirming = false
-    @State private var hover = false
-
-    var share: Double { c.waste?.share ?? 0 }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .center, spacing: 8) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(c.title).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.tail)
-                    HStack(spacing: 5) {
-                        Tag(text: c.family.isEmpty ? "?" : c.family, color: c.family == "fable" ? .purple : .secondary)
-                        if let n = c.subs_active, n > 0 {
-                            Tag(text: "\(n) sub", color: .orange, filled: true)
-                        }
-                        Text(c.busy ? "working" : "idle \(idle(c.idle_min))")
-                            .font(.system(size: 11)).lineLimit(1).fixedSize()
-                            .foregroundStyle(c.busy ? Color.green : Color.secondary)
-                        Text(c.folder).font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
-                            .foregroundStyle(.tertiary).layoutPriority(-1)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                Num(value: c.rate_pct_h != nil ? pct(c.rate_pct_h) + "/h" : usd(c.rate_usd_h ?? 0) + "/h",
-                    caption: "now", width: 64)
-                Num(value: (c.waste?.steps ?? 0) == 0 ? "-" : "\(Int((share * 100).rounded()))%",
-                    caption: "waste", color: share >= 0.4 ? .orange : .primary, width: 42)
-                Num(value: kTok(c.ctx), caption: "context", width: 48)
-            }
-            if let a = c.advice.first, a.count > 1 {
-                Text(a[1]).font(.system(size: 11)).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let j = c.job, let msg = j.msg {
-                Text(msg).font(.caption).foregroundStyle(j.state == "error" ? Color.red : Color.secondary)
-            } else if confirming {
-                HStack(spacing: 6) {
-                    Button("Handoff and close") { model.close(c.pid, handoff: true); confirming = false }
-                        .buttonStyle(.borderedProminent)
-                    Button("Close now") { model.close(c.pid, handoff: false); confirming = false }
-                    Button("Cancel") { confirming = false }.buttonStyle(.borderless)
-                    Spacer()
-                }
-                .controlSize(.small)
-            } else if hover {
-                HStack {
-                    Spacer()
-                    Button("Close...") { confirming = true }.controlSize(.small).buttonStyle(.borderless)
-                }
-            }
-        }
-        .padding(.vertical, 7)
-        .padding(.horizontal, 10)
-        .background(RoundedRectangle(cornerRadius: 8).fill(hover ? Color.primary.opacity(0.05) : Color.clear))
-        .onHover { hover = $0 }
-    }
-}
-
-struct AlertCard: View {
+struct AttentionRow: View {
     @EnvironmentObject var model: Model
     let a: AlertItem
+    @State private var open = false
 
     var runaway: Bool { a.kind == "runaway" }
     var color: Color { runaway ? .red : .orange }
+    var headline: String {
+        if runaway { return "Burning fast, mostly on real work" }
+        let share = Int(((a.share ?? 0) * 100).rounded())
+        return "\(share)% of what it uses is waste"
+    }
+    var rate: String {
+        if let p = a.waste_pct_h { return String(format: "%.1f%%/hr", p) }
+        return usd(a.waste_usd_h ?? 0) + "/hr"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: runaway ? "flame.fill" : "drop.fill").foregroundStyle(color)
+                Image(systemName: runaway ? "flame.fill" : "drop.fill").font(.system(size: 11)).foregroundStyle(color)
                 Text(a.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 if let n = a.subs_active, n > 0 { Tag(text: "\(n) sub", color: .orange, filled: true) }
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
+                Text(rate).font(.system(size: 13, weight: .semibold)).monospacedDigit().foregroundStyle(color)
             }
-            Text(a.text).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
-            VStack(alignment: .leading, spacing: 3) {
-                ForEach(a.reasons ?? [], id: \.self) { r in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Circle().fill(color.opacity(0.7)).frame(width: 4, height: 4).offset(y: -2)
-                        Text(r).font(.system(size: 11)).foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                Text(headline).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                Button(open ? "Hide" : "Why") { withAnimation(.easeOut(duration: 0.15)) { open.toggle() } }
+                    .buttonStyle(.borderless).font(.system(size: 11))
+            }
+            if let cs = a.causes, !cs.isEmpty {
+                HStack(spacing: 5) {
+                    ForEach(cs, id: \.self) { c in Tag(text: c.pill, color: causeColor(c.kind), filled: true) }
+                }
+            }
+            if open {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(a.causes ?? [], id: \.self) { c in
+                        Text(c.text).font(.system(size: 11)).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if a.busy {
+                        Text("Working right now: closing stops it mid-task.").font(.system(size: 10)).foregroundStyle(.tertiary)
                     }
                 }
             }
-            if a.busy {
-                Text("Working right now: closing stops it mid-task.").font(.system(size: 10)).foregroundStyle(.tertiary)
-            }
             HStack(spacing: 6) {
-                // the button for the main cause comes first
                 switch a.fix ?? "handoff" {
                 case "model":
                     Button("Copy /model opus") { model.copyModelSwitch() }.buttonStyle(.borderedProminent)
@@ -430,92 +479,160 @@ struct AlertCard: View {
                     Button("Close now") { model.close(a.pid, handoff: false) }
                 }
                 Spacer()
-                if a.fix != "wait" {
-                    Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderless)
-                }
+                if a.fix != "wait" { Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderless) }
             }
-            .controlSize(.small)
+            .controlSize(.small).tint(coral)
         }
-        .padding(11)
-        .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.07)))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.18), lineWidth: 1))
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(color.opacity(0.16), lineWidth: 1))
+    }
+}
+
+struct ChatRow: View {
+    @EnvironmentObject var model: Model
+    let c: Chat
+    @State private var confirming = false
+    @State private var hover = false
+
+    var share: Double { c.waste?.share ?? 0 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(c.title).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                    HStack(spacing: 5) {
+                        Tag(text: c.family.isEmpty ? "?" : c.family, color: c.family == "fable" ? .purple : .secondary)
+                        if let n = c.subs_active, n > 0 { Tag(text: "\(n) sub", color: .orange, filled: true) }
+                        if c.busy {
+                            Circle().fill(Color.green).frame(width: 6, height: 6)
+                            Text("working").font(.system(size: 11)).foregroundStyle(.green).fixedSize()
+                        } else {
+                            Text("idle \(idle(c.idle_min))").font(.system(size: 11)).foregroundStyle(.secondary).fixedSize()
+                        }
+                        Text(c.folder).font(.system(size: 11)).lineLimit(1).foregroundStyle(.tertiary).layoutPriority(-1)
+                    }
+                    if let cause = c.cause {
+                        Tag(text: cause.pill, color: causeColor(cause.kind), filled: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Num(value: c.rate_pct_h != nil ? pct(c.rate_pct_h) + "/h" : usd(c.rate_usd_h ?? 0) + "/h",
+                    caption: "now", width: 62)
+                Num(value: (c.waste?.steps ?? 0) == 0 ? "-" : "\(Int((share * 100).rounded()))%",
+                    caption: "waste", color: share >= 0.4 ? .orange : .primary, width: 40)
+                Num(value: kTok(c.ctx), caption: "context", width: 46)
+            }
+            if let j = c.job, let msg = j.msg {
+                Text(msg).font(.system(size: 11)).foregroundStyle(j.state == "error" ? Color.red : Color.secondary)
+            } else if confirming {
+                HStack(spacing: 6) {
+                    Button("Handoff and close") { model.close(c.pid, handoff: true); confirming = false }
+                        .buttonStyle(.borderedProminent)
+                    Button("Close now") { model.close(c.pid, handoff: false); confirming = false }
+                    Button("Cancel") { confirming = false }.buttonStyle(.borderless)
+                    Spacer()
+                }
+                .controlSize(.small).tint(coral)
+            }
+        }
+        .padding(.vertical, 7).padding(.horizontal, 10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(hover ? Color.primary.opacity(0.05) : Color.clear))
+        .overlay(alignment: .topTrailing) {
+            if hover && c.job == nil && !confirming {
+                Button { confirming = true } label: { Image(systemName: "xmark.circle.fill") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help("Close this chat").padding(4)
+            }
+        }
+        .onHover { hover = $0 }
     }
 }
 
 struct Panel: View {
     @EnvironmentObject var model: Model
     var scrolls = true
+    @State private var showAll = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("Chatwatch").font(.system(size: 15, weight: .bold))
+                if let p = model.data?.plan.plan, !p.isEmpty {
+                    Text(p).font(.system(size: 11, weight: .semibold))
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(Capsule().fill(Color.primary.opacity(0.08)))
+                }
+                Spacer()
+                IconButton(symbol: "arrow.clockwise", help: "Refresh") { model.refresh() }
+                IconButton(symbol: "chart.line.uptrend.xyaxis", help: "Open dashboard") { NSWorkspace.shared.open(base) }
+            }
             if let err = model.error, model.data == nil {
                 Text(err).font(.callout).foregroundStyle(.secondary).padding(.vertical, 20)
             } else if let d = model.data {
-                if d.plan.meters.isEmpty {
-                    Text("Plan limits unavailable\(d.plan.why.map { ": " + $0 } ?? ""). Showing API-rate dollars.")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else {
-                    ForEach(["five_hour", "week"].filter { d.plan.meters[$0] != nil }, id: \.self) { k in
-                        MeterView(m: d.plan.meters[k]!)
-                    }
-                }
-                Divider()
-                if model.alerts.isEmpty {
-                    Label("No chat is wasting much right now.", systemImage: "checkmark.circle")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Needs attention").font(.system(size: 12, weight: .semibold))
-                        Text("Usage that better token handling would save, worst first.")
-                            .font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    ForEach(model.alerts) { a in AlertCard(a: a) }
-                }
-                Divider()
-                HStack {
-                    Text("\(d.chats.count) open chats, \(d.chats.filter { $0.busy }.count) working")
-                        .font(.caption).foregroundStyle(.secondary)
-                    Spacer()
-                    if let u = d.plan.unit, let m = d.plan.meters[u], d.plan.meters.count > 1 {
-                        Text("shares of your \(m.label)").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-                let rows = VStack(spacing: 2) {
-                    ForEach(d.chats) { c in ChatRow(c: c, ctxAlert: d.thresholds.ctx) }
-                    ForEach(Array((d.closed ?? [:]).values.enumerated()), id: \.offset) { _, j in
-                        HStack {
-                            Text(j.msg ?? "").font(.caption).foregroundStyle(.secondary)
-                            Spacer()
-                            if let p = j.path, !p.isEmpty {
-                                Button("Open handoff") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }
-                                    .controlSize(.small)
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                    }
-                }
-                if scrolls {
-                    // a ScrollView has no height of its own in the menu bar panel; give it one
-                    ScrollView { rows }
-                        .frame(height: min(CGFloat(d.chats.count) * 64 + 16, model.alerts.isEmpty ? 440 : 300))
-                } else {
-                    rows
-                }
+                MetersCard(plan: d.plan)
+                content(d)
             } else {
                 ProgressView().frame(maxWidth: .infinity).padding()
             }
             Divider()
             HStack {
-                Button("Open full page") { NSWorkspace.shared.open(base) }.buttonStyle(.borderless)
+                Button { NSWorkspace.shared.open(base) } label: {
+                    Label("Open Dashboard", systemImage: "chart.line.uptrend.xyaxis")
+                }
+                .buttonStyle(.borderless)
                 Spacer()
-                Text("updated \(model.updated.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption2).foregroundStyle(.tertiary)
-                Button("Quit") { NSApp.terminate(nil) }.buttonStyle(.borderless)
+                Button("Quit") { NSApp.terminate(nil) }.buttonStyle(.borderless).foregroundStyle(.secondary)
             }
-            .font(.caption)
+            .font(.system(size: 12))
         }
         .padding(14)
         .frame(width: 420)
+    }
+
+    @ViewBuilder func content(_ d: Payload) -> some View {
+        let shown = showAll ? d.chats : Array(d.chats.prefix(6))
+        let body = VStack(alignment: .leading, spacing: 10) {
+            if model.alerts.isEmpty {
+                Label("No chat is wasting much right now.", systemImage: "checkmark.circle")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            } else {
+                HStack {
+                    Text("Needs attention").font(.system(size: 13, weight: .semibold))
+                    Spacer()
+                    Text("wasted per hour").font(.system(size: 10)).foregroundStyle(.tertiary)
+                }
+                ForEach(model.alerts) { a in AttentionRow(a: a) }
+            }
+            HStack {
+                Text("Chats").font(.system(size: 13, weight: .semibold))
+                Text("\(d.chats.count) open, \(d.chats.filter { $0.busy }.count) working")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(.top, 4)
+            VStack(spacing: 0) {
+                ForEach(shown) { c in ChatRow(c: c) }
+            }
+            if d.chats.count > 6 {
+                Button(showAll ? "Show fewer" : "Show all \(d.chats.count)") { showAll.toggle() }
+                    .buttonStyle(.borderless).font(.system(size: 12))
+            }
+            ForEach(Array((d.closed ?? [:]).values.enumerated()), id: \.offset) { _, j in
+                HStack {
+                    Text(j.msg ?? "").font(.system(size: 11)).foregroundStyle(.secondary)
+                    Spacer()
+                    if let p = j.path, !p.isEmpty {
+                        Button("Open handoff") { NSWorkspace.shared.open(URL(fileURLWithPath: p)) }.controlSize(.small)
+                    }
+                }
+            }
+        }
+        if scrolls {
+            ScrollView { body }.frame(height: min(CGFloat(shown.count) * 52 + CGFloat(model.alerts.count) * 130 + 90, 460))
+        } else {
+            body
+        }
     }
 }
 

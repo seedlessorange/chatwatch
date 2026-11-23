@@ -384,6 +384,8 @@ def chats():
         r["rate_pct_h"] = round(r["rate_usd_h"] * k, 3) if k else None
         r["waste_pct_h"] = round(r["waste_usd_h"] * k, 3) if k else None
         r["advice"] = advice(r)
+        c = causes(r) if r["waste"]["share"] >= 0.3 and r["waste_usd_h"] >= 2 else []
+        r["cause"] = c[0] if c else None
     rows.sort(key=lambda r: (-r["waste_usd_h"], -r["rate_usd_h"], -r["hour_usd"]))
     return rows
 
@@ -427,6 +429,33 @@ def waste_of(steps):
 
 
 # ---------------------------------------------------------------- the plan's meters
+def plan_name():
+    """'Pro', 'Max 5x', 'Max 20x'... from Claude Code's login; only the plan fields are read."""
+    raw = None
+    if MAC:
+        try:
+            r = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                               capture_output=True, text=True, timeout=10)
+            raw = r.stdout if r.returncode == 0 else None
+        except Exception:
+            pass
+    if raw is None:
+        try:
+            with open(os.path.join(CLAUDE, ".credentials.json"), encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            return ""
+    try:
+        o = (json.loads(raw) or {}).get("claudeAiOauth") or {}
+    except ValueError:
+        return ""
+    sub, tier = (o.get("subscriptionType") or "").lower(), (o.get("rateLimitTier") or "").lower()
+    m = re.search(r"(\d+)x", tier)
+    if sub == "max":
+        return f"Max {m.group(1)}x" if m else "Max"
+    return sub.capitalize()
+
+
 def _token():
     """(token, why-not). Claude Code keeps its login in the macOS Keychain, or
     in ~/.claude/.credentials.json on Windows and Linux."""
@@ -533,8 +562,17 @@ def plan_status(force=False):
         except Exception as exc:
             why = "Anthropic did not answer" + (f" ({exc.code})" if hasattr(exc, "code") else "")
     if isinstance(data, dict):
+        scoped = []
+        for l in data.get("limits") or []:
+            if not isinstance(l, dict) or l.get("kind") != "weekly_scoped":
+                continue
+            sc = (l.get("scope") or {})
+            name = ((sc.get("model") or {}).get("display_name") or (sc.get("surface") or {}).get("display_name")
+                    if isinstance(sc.get("surface"), dict) else (sc.get("model") or {}).get("display_name"))
+            if name and l.get("percent") is not None:
+                scoped.append({"label": name, "pct": float(l["percent"]), "resets": _ts(l.get("resets_at")) or None})
         out = {"at": time.time(), "week": _meter(data.get("seven_day")),
-               "five_hour": _meter(data.get("five_hour"))}
+               "five_hour": _meter(data.get("five_hour")), "scoped": scoped, "plan": plan_name()}
         try:
             with open(PLAN_CACHE, "w", encoding="utf-8") as f:
                 json.dump(out, f)
@@ -622,7 +660,10 @@ def plan_summary(rows, force=False):
     cal = _read_json(CALIB) or {}
     hour_usd = sum(r["hour_usd"] for r in rows)
     unit, _ = share_unit()
-    out = {"why": s.get("why", ""), "read_at": s.get("at"), "unit": unit, "meters": {}}
+    out = {"why": s.get("why", ""), "read_at": s.get("at"), "unit": unit, "meters": {},
+           "plan": s.get("plan", ""), "scoped": s.get("scoped") or [],
+           # Pro plans always have a 5-hour window, even before it has started
+           "session_expected": s.get("plan", "") == "Pro" or s.get("five_hour") is not None}
     for meter, (_, _, _, label) in METERS.items():
         m = s.get(meter)
         if not m:
@@ -841,6 +882,18 @@ def waste_reasons(r):
     return reasons
 
 
+def causes(r):
+    """Short pills for a chat's waste, with the full sentence for the details view:
+    [{kind, pill, text}], biggest first."""
+    w = r["waste"]
+    pills = {"context": f"Context {w['main_avg_ctx'] // 1000}K",
+             "subagents": f"Subagents {w['sub_avg_ctx'] // 1000}K each",
+             "rebuild": f"Cache rebuilt x{w['rebuilds']}",
+             "fable": "Fable",
+             "jump": f"+{r['ctx_growth'] // 1000}K in {CTX_JUMP_MIN} min"}
+    return [{"kind": k, "pill": pills.get(k, k), "text": t} for k, t in waste_reasons(r)]
+
+
 def live_alerts(rows):
     """Chats burning a lot for bad reasons, snoozed ones left out, worst first:
     [{id, sid, pid, kind, title, text, reasons, fix, family, busy, notify}].
@@ -875,7 +928,9 @@ def live_alerts(rows):
         fix = ("model" if top == "fable" else "close" if top == "rebuild" and not r["busy"]
                else "wait" if top == "subagents" else "handoff")
         out.append({"id": aid, "sid": r["sid"], "pid": r["pid"], "kind": kind, "title": r["title"],
-                    "text": text, "reasons": [t for _, t in reasons[:3]], "fix": fix,
+                    "text": text, "reasons": [t for _, t in reasons[:3]], "causes": causes(r)[:3], "fix": fix,
+                    "waste_pct_h": r.get("waste_pct_h"), "waste_usd_h": r["waste_usd_h"],
+                    "share": r["waste"]["share"],
                     "family": r["family"], "busy": r["busy"], "subs_active": r["subs_active"],
                     "notify": kind in NOTIFY_KINDS})
     out.sort(key=lambda a: -next(r["waste_usd_h"] for r in rows if r["sid"] == a["sid"]))
