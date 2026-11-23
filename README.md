@@ -27,7 +27,7 @@ Either installer starts chatwatch at login and opens http://127.0.0.1:7731. On a
 
 ## The menu bar app (Mac)
 
-On a Mac the installer also builds a small menu bar app if Xcode's command line tools are installed (`xcode-select --install`; run `mac/build.sh` afterwards if you add them later). It shows a ring and the percentage of the limit you are closest to, and turns red when you are past 90% or when the last hour's pace would reach the limit before it resets. Click it for the same chats and close buttons as the page, without opening a browser. If you have many menu bar icons, a new one can end up hidden behind the notch; hold Command and drag it further right.
+On a Mac the installer also builds a small menu bar app if Xcode's command line tools are installed (`xcode-select --install`; run `mac/build.sh` afterwards if you add them later). It shows a ring and the percentage of the limit you are closest to, and turns red when you are past 90% or when the last hour's pace would reach the limit before it resets. Click it for the same chats and close buttons as the page, without opening a browser. Each chat under Needs attention has a Copy fix button per cause: a short message to paste into that chat, such as `/compact` with a focus, narrower subagent briefs, reading files with offset and limit, `/model opus`, or a request for a handoff note. Snooze sits beside it as a small button. If you have many menu bar icons, a new one can end up hidden behind the notch; hold Command and drag it further right.
 
 ## What you see
 
@@ -47,15 +47,17 @@ You can also get a table in the terminal with `python3 chatwatch.py`.
 
 ## Alerts
 
-At most one notification every 5 minutes, listing only what is new: a chat holding more than 250K tokens of context, a chat using 2% of your limit in an hour, a pace that reaches the limit before it resets, a Fable chat left idle for 30 minutes, or ten chats idle for three hours. The same alert for the same chat repeats at most every six hours. The thresholds are at the top of `chatwatch.py`.
+At most one notification every 5 minutes, listing only what is new: a chat wasting a lot of your limit or burning through it fast, a pace that reaches the limit before it resets, or ten chats idle for three hours.
+
+A chat holding 200K tokens or more on the 1-hour cache also gets a "going cold" notification once it has been idle 50 minutes. When the cache expires at 60 minutes, the next message pays for the whole context again as a cache write, which on one Max account cost about 80 times a warm step (0.29% of the weekly limit for a 304K Fable chat, against 0.004%). Asking the chat for a handoff note before then is cheap; the notification's Copy fix button puts that request on your clipboard. The same alert for the same chat repeats at most every six hours. The thresholds are at the top of `chatwatch.py`.
 
 ## How the per-chat numbers are worked out
 
-Anthropic reports one percentage per limit and does not say which chat used it. Every 5 minutes chatwatch takes a reading of the meters and adds up what all your chats used since the previous reading, weighting each step by its model's API price, so a step on Opus counts for more than one on Sonnet. Dividing how far the meter moved by that total gives how much of the limit one unit of usage is worth, and each chat's share follows from that. The figure needs the meter to move a few points first, so after installing you will see dollars until it has.
+Anthropic reports one percentage per limit and does not say which chat used it. Every 5 minutes chatwatch takes a reading of the meters and adds up what all your chats used since the previous reading, weighting each token by how much that kind of token moves the meter. Dividing how far the meter moved by that total gives how much of the limit one unit of usage is worth, and each chat's share follows from that. The figure needs the meter to move a few points first, so after installing you will see dollars until it has.
 
-On one Max account, two separate stretches of a day each came out within 15% of each other, which is about as close as the whole-number meter allows. Treat the per-chat shares as good estimates. Anything you do on claude.ai or the Claude apps is not in these transcripts, so it gets spread over your chats.
+Those weights come from your own readings. `python3 chatwatch.py fit` compares a month of meter readings with every step in your transcripts and finds, per model, how much a cache read, a cache write and an output token each move the meter; `fit --save` puts them to use (restart chatwatch afterwards). On one Max account, from 25 Oct to 23 Nov 2026, the fit explained 99% of the meter's movement and predicted days it had not seen to within 0.64 points per 3-hour stretch, against 1.45 with API prices. Per token, with Opus output as 1, a cache read counted 0.0027 (API prices say 0.02), a cache write 0.22, Sonnet 0.6 times Opus and Fable 3.15 times Opus. At API prices cache reads looked like 62% of that account's usage; on the meter they were 24%. Claude Code deletes transcripts after 30 days by default, so the fit only uses the last 29. Until you run it, chatwatch uses that account's weights. Anything you do on claude.ai or the Claude apps is not in these transcripts, so it gets spread over your chats.
 
-The dollar figures are what the same tokens would cost on the API. Nothing is billed; they are there to compare chats.
+The dollar figures are meter dollars: the fitted weights, scaled so an Opus output token costs its API price. Nothing is billed; they are there to compare chats.
 
 ## What it reads and sends
 
@@ -63,7 +65,7 @@ chatwatch reads `~/.claude/sessions/` and `~/.claude/projects/` (the files Claud
 
 The page is served on 127.0.0.1 only. The close buttons need a key that is generated each time chatwatch starts and is only in the page, so another website cannot close your chats.
 
-It writes `~/.claude/chatwatch-*.json*` (its readings, calibration and alert history), `~/.claude/handoffs/` and, on a Mac, `~/.claude/chatwatch.log`.
+It writes `~/.claude/chatwatch-*.json*` (its readings, calibration, fitted weights and alert history), `~/.claude/handoffs/` and, on a Mac, `~/.claude/chatwatch.log`.
 
 ## Remove it
 

@@ -44,7 +44,7 @@ struct Chat: Codable, Identifiable {
 }
 
 struct Waste: Codable { let share: Double; let steps: Int }
-struct Cause: Codable, Hashable { let kind: String; let pill: String; let text: String }
+struct Cause: Codable, Hashable { let kind: String; let pill: String; let text: String; let fix: String? }
 struct Scoped: Codable { let label: String; let pct: Double; let resets: Double? }
 struct SettingCheck: Codable, Hashable { let label: String; let ok: Bool }
 struct SettingsInfo: Codable { let checks: [SettingCheck]; let advice: String }
@@ -73,6 +73,11 @@ struct AlertItem: Codable, Identifiable {
     let waste_pct_h: Double?
     let waste_usd_h: Double?
     let share: Double?
+    let cold_in_min: Int?
+    let cold_cost_pct: Double?
+    let cold_cost_usd: Double?
+    /// The causes that come with a message to paste into the chat.
+    var fixes: [Cause] { (causes ?? []).filter { !($0.fix ?? "").isEmpty } }
 }
 
 struct Plan: Codable {
@@ -149,10 +154,12 @@ final class Model: ObservableObject {
 
     func close(_ pid: Int, handoff: Bool) { post("api/close", ["pid": pid, "handoff": handoff]) }
     func snooze(_ id: String, hours: Double = 1) { post("api/snooze", ["id": id, "hours": hours]) }
-    func copyModelSwitch() {
+    func copy(_ text: String) {
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("/model opus", forType: .string)
+        NSPasteboard.general.setString(text, forType: .string)
     }
+    func copyModelSwitch() { copy("/model opus") }
+
 
     var alerts: [AlertItem] { data?.alerts ?? [] }
     var urgent: Int { alerts.filter { $0.notify }.count }
@@ -168,11 +175,12 @@ final class Model: ObservableObject {
             if now - (sent[a.id] ?? 0) < gap { continue }
             sent[a.id] = now
             let c = UNMutableNotificationContent()
-            c.title = (a.kind == "runaway" ? "Burning fast: " : "Wasting tokens: ") + a.title
-            c.body = a.text + (a.reasons?.first.map { " " + $0 } ?? "")
+            c.title = (a.kind == "runaway" ? "Burning fast: " : a.kind == "cold" ? "Going cold: " : "Wasting tokens: ") + a.title
+            c.body = a.kind == "cold" ? a.text : a.text + (a.reasons?.first.map { " " + $0 } ?? "")
             c.sound = .default
-            c.categoryIdentifier = a.fix == "model" ? "fable" : "chat"
-            c.userInfo = ["pid": a.pid, "id": a.id]
+            let fix = a.fixes.first?.fix ?? ""
+            c.categoryIdentifier = fix.isEmpty ? "plain" : "chat"
+            c.userInfo = ["pid": a.pid, "id": a.id, "fix": fix]
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: a.id + "@\(Int(now))", content: c, trigger: nil)) { err in
                 log("notify \(a.id) \(err.map { "failed: \($0)" } ?? "ok")")
             }
@@ -361,7 +369,7 @@ struct MetersCard: View {
                 MeterBlock(label: sc.label, pct: sc.pct, resets: sc.resets)
             }
             if plan.meters.isEmpty {
-                Text("Plan limits unavailable\(plan.why.map { ": " + $0 } ?? ""). Showing API-rate dollars.")
+                Text("Plan limits unavailable\(plan.why.map { ": " + $0 } ?? ""). Showing meter dollars.")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             HStack(spacing: 5) {
@@ -397,6 +405,7 @@ func causeColor(_ kind: String) -> Color {
     switch kind {
     case "fable": return .purple
     case "rebuild": return .blue
+    case "cold": return .teal
     case "jump": return .red
     default: return .orange
     }
@@ -458,23 +467,42 @@ struct AttentionRow: View {
     @EnvironmentObject var model: Model
     let a: AlertItem
     @State private var open = false
+    @State private var copied: String?
 
     var runaway: Bool { a.kind == "runaway" }
-    var color: Color { runaway ? .red : .orange }
+    var cold: Bool { a.kind == "cold" }
+    var color: Color { runaway ? .red : cold ? .teal : .orange }
     var headline: String {
         if runaway { return "Burning fast, mostly on real work" }
+        if cold { return "Cache expires in \(a.cold_in_min ?? 0) min: hand off now" }
         let share = Int(((a.share ?? 0) * 100).rounded())
         return "\(share)% of what it uses is waste"
     }
     var rate: String {
+        if cold {
+            if let p = a.cold_cost_pct { return pct(p) }
+            return usd(a.cold_cost_usd ?? 0)
+        }
         if let p = a.waste_pct_h { return String(format: "%.1f%%/hr", p) }
         return usd(a.waste_usd_h ?? 0) + "/hr"
+    }
+    /// The button name for a cause's fix; just "Copy fix" when there is only one.
+    func label(_ c: Cause) -> String {
+        if a.fixes.count < 2 { return "Copy fix" }
+        let names = ["context": "context", "subagents": "subagents", "jump": "big reads",
+                     "fable": "Fable", "rebuild": "rebuild", "cold": "handoff"]
+        return "Copy fix: " + (names[c.kind] ?? c.kind)
+    }
+    func copyFix(_ c: Cause) {
+        model.copy(c.fix ?? "")
+        withAnimation { copied = c.kind }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) { withAnimation { if copied == c.kind { copied = nil } } }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: runaway ? "flame.fill" : "drop.fill").font(.system(size: 11)).foregroundStyle(color)
+                Image(systemName: runaway ? "flame.fill" : cold ? "snowflake" : "drop.fill").font(.system(size: 11)).foregroundStyle(color)
                 Text(a.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                 if let n = a.subs_active, n > 0 { Tag(text: "\(n) sub", color: .orange, filled: true) }
                 Spacer(minLength: 4)
@@ -492,10 +520,14 @@ struct AttentionRow: View {
                 }
             }
             if open {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     ForEach(a.causes ?? [], id: \.self) { c in
                         Text(c.text).font(.system(size: 11)).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        if let f = c.fix, !f.isEmpty {
+                            Text("Fix to paste: " + f).font(.system(size: 10)).foregroundStyle(.tertiary)
+                                .lineLimit(3).fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     if a.busy {
                         Text("Working right now: closing stops it mid-task.").font(.system(size: 10)).foregroundStyle(.tertiary)
@@ -503,24 +535,29 @@ struct AttentionRow: View {
                 }
             }
             HStack(spacing: 6) {
-                switch a.fix ?? "handoff" {
-                case "model":
-                    Button("Copy /model opus") { model.copyModelSwitch() }.buttonStyle(.borderedProminent)
-                    Button("Handoff and close") { model.close(a.pid, handoff: true) }
-                case "close":
-                    Button("Close now") { model.close(a.pid, handoff: false) }.buttonStyle(.borderedProminent)
-                    Button("Handoff and close") { model.close(a.pid, handoff: true) }
-                case "wait":
-                    Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderedProminent)
-                    Button("Close now") { model.close(a.pid, handoff: false) }
-                default:
+                ForEach(Array(a.fixes.prefix(2).enumerated()), id: \.offset) { i, c in
+                    if i == 0 {
+                        Button(label(c)) { copyFix(c) }.buttonStyle(.borderedProminent)
+                    } else {
+                        Button(label(c)) { copyFix(c) }.buttonStyle(.bordered)
+                    }
+                }
+                if a.fixes.isEmpty {
                     Button("Handoff and close") { model.close(a.pid, handoff: true) }.buttonStyle(.borderedProminent)
+                }
+                Spacer(minLength: 4)
+                Menu("Close") {
+                    Button("Handoff and close") { model.close(a.pid, handoff: true) }
                     Button("Close now") { model.close(a.pid, handoff: false) }
                 }
-                Spacer()
-                if a.fix != "wait" { Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderless) }
+                .menuStyle(.borderlessButton).fixedSize()
+                Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderless)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .controlSize(.small).tint(coral)
+            if copied != nil {
+                Text("Copied. Paste it into that chat.").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .background(RoundedRectangle(cornerRadius: 12).fill(color.opacity(0.07)))
@@ -640,7 +677,9 @@ struct Panel: View {
                 HStack {
                     Text("Needs attention").font(.system(size: 13, weight: .semibold))
                     Spacer()
-                    Text("wasted per hour").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Text(model.alerts.allSatisfy { $0.kind == "cold" } ? "cost to resume cold"
+                         : model.alerts.contains { $0.kind == "cold" } ? "wasted per hour, or to resume cold"
+                         : "wasted per hour").font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
                 ForEach(model.alerts) { a in AttentionRow(a: a) }
             }
@@ -689,9 +728,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let handoff = UNNotificationAction(identifier: "handoff", title: "Handoff and close", options: [.destructive])
         let close = UNNotificationAction(identifier: "close", title: "Close now", options: [.destructive])
         let snooze = UNNotificationAction(identifier: "snooze", title: "Snooze 1 hour", options: [])
+        let copyFix = UNNotificationAction(identifier: "copyfix", title: "Copy fix", options: [])
         let copy = UNNotificationAction(identifier: "copy", title: "Copy /model opus", options: [])
         c.setNotificationCategories([
-            UNNotificationCategory(identifier: "chat", actions: [handoff, close, snooze], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "chat", actions: [copyFix, handoff, close, snooze], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "plain", actions: [handoff, close, snooze], intentIdentifiers: []),
             UNNotificationCategory(identifier: "fable", actions: [copy, handoff, snooze], intentIdentifiers: []),
         ])
         c.requestAuthorization(options: [.alert, .sound, .badge]) { ok, err in
@@ -710,6 +751,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let info = r.notification.request.content.userInfo
         let pid = info["pid"] as? Int ?? 0
         let id = info["id"] as? String ?? ""
+        let fix = info["fix"] as? String ?? ""
         let action = r.actionIdentifier
         log("action \(action) on \(id)")
         Task { @MainActor in
@@ -718,6 +760,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             case "handoff": m.close(pid, handoff: true)
             case "close": m.close(pid, handoff: false)
             case "snooze": m.snooze(id)
+            case "copyfix": if !fix.isEmpty { m.copy(fix) }
             case "copy": m.copyModelSwitch()
             default: self.showWindow()
             }
