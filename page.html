@@ -63,6 +63,11 @@
   .job { font-size: 13px; color: var(--muted); }
   .job.error { color: var(--hot); } .job.done { color: var(--accent); }
   .job a { color: inherit; }
+  .alert { background: var(--card); border: 1px solid var(--warn); border-radius: 12px; padding: 14px 16px; margin-bottom: 10px; }
+  .alert.runaway { border-color: var(--hot); }
+  .alert .head { display: flex; justify-content: space-between; gap: 12px; font-weight: 600; }
+  .alert .rate { color: var(--warn); font-variant-numeric: tabular-nums; } .alert.runaway .rate { color: var(--hot); }
+  .alert ul { margin: 6px 0 0; padding-left: 18px; font-size: 13.5px; color: var(--muted); }
   .note { color: var(--muted); font-size: 12.5px; margin-top: 26px; max-width: 760px; }
   dialog { border: 1px solid var(--line); border-radius: 14px; background: var(--card); color: var(--ink); max-width: 460px; padding: 20px; }
   dialog::backdrop { background: rgba(0,0,0,.35); }
@@ -79,6 +84,7 @@
   <h1>Chat usage</h1>
   <div class="sub" id="sub">Reading your open chats...</div>
   <div class="plan" id="plan"></div>
+  <div id="alerts"></div>
   <div class="stats" id="stats"></div>
   <div class="sub" id="unitnote"></div>
   <div class="bar-top">
@@ -159,7 +165,23 @@ function render() {
             ${m.full_at ? (before ? `At that pace you reach the limit ${when(m.full_at)}, before the reset.` : `At that pace it lasts until the reset.`) : ""}</div>
             <div class="line">1% is about ${usd(1 / m.pct_per_usd)} at API rates, measured from the meter moving ${m.calib_points} points over ${m.calib_hours} h.</div>`
           : `<div class="line">Per-chat shares start once this meter has moved a few points (usually within a few hours of use).</div>`}
-        </div>`; }).join("");
+        </div>`; }).join("") + (p.scoped || []).map(sc => `<div class="meterblock">
+          <div class="top"><div><span class="big">${sc.pct.toFixed(0)}%</span> of your ${esc(sc.label)} limit used</div>
+            <div class="line">${sc.resets ? "resets " + when(sc.resets) : ""}</div></div>
+          <div class="track"><i class="${sc.pct >= 90 ? "hot" : sc.pct >= 75 ? "warn" : ""}" style="width:${sc.pct}%"></i></div>
+        </div>`).join("");
+  const al = data.alerts || [];
+  $("#alerts").innerHTML = al.length ? `<h2 style="font-size:16px;margin:18px 0 8px">Needs attention</h2>` + al.map(a => {
+    const rate = a.waste_pct_h != null ? pct(a.waste_pct_h) + " wasted per hour" : usd(a.waste_usd_h || 0) + " wasted per hour";
+    return `<div class="alert ${a.kind}">
+      <div class="head"><span>${esc(a.title)}</span><span class="rate">${rate}</span></div>
+      <div class="line" style="font-size:13.5px">${esc(a.text)}</div>
+      ${(a.reasons || []).length ? `<ul>${a.reasons.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+      <div class="actions">
+        <button class="primary" onclick="ask(${a.pid}, true)">Close + handoff</button>
+        <button onclick="ask(${a.pid}, false)">Close, no handoff</button>
+        <button onclick="snooze('${esc(a.id)}')">Snooze 1 h</button>
+      </div></div>`; }).join("") : "";
   $("#stats").innerHTML = [
     [cal ? pct(hourPct) : usd(hour), cal ? `of your ${unitName}, last hour` : "used in the last hour, all chats"],
     [cs.length, "open chats"],
@@ -187,7 +209,7 @@ function render() {
         <div class="meta">
           <span class="pill m-${c.family}">${esc(c.family || "?")}</span>
           <span>${esc(c.folder)}</span><span>${state}</span>
-          <span>${c.steps} steps${c.subagents ? `, ${c.subagents} subagents` : ""}</span>
+          <span>${c.steps} step${c.steps === 1 ? "" : "s"}${c.subagents ? `, ${c.subagents} subagents` : ""}</span>
         </div>
       </div>
       <div class="nums">
@@ -216,6 +238,7 @@ function render() {
 function ask(pid, handoff) {
   const c = data.chats.find(x => x.pid === pid);
   if (!c) return;
+  const p = data.plan || {}, unitName = p.unit && p.meters[p.unit] ? p.meters[p.unit].label : "limit";
   $("#dlg-title").textContent = handoff ? "Close with a handoff note?" : "Close without a handoff?";
   $("#dlg-body").innerHTML =
     `<p><b>${esc(c.title)}</b> (${esc(c.folder)})</p>` +
@@ -232,6 +255,12 @@ function ask(pid, handoff) {
   $("#dlg").showModal();
 }
 $("#dlg-cancel").onclick = () => $("#dlg").close();
+
+async function snooze(id) {
+  await fetch("/api/snooze", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN },
+                               body: JSON.stringify({ id, hours: 1 }) });
+  load();
+}
 
 async function openFile(path) {
   await fetch("/api/open", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN },

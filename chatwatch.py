@@ -1310,6 +1310,10 @@ def check(rows=None, send=True):
         for key, _ in fresh:
             st[key] = now
         live = {r["sid"] for r in rows}
+        # a snooze pressed while this check ran was written after `st` was read: keep it
+        for key, v in (_read_json(STATE) or {}).items():
+            if key.startswith("snooze:"):
+                st[key] = max(v, st.get(key, 0))
         st = {key: v for key, v in st.items()
               if key == "pile" or key.startswith(("pace:", "snooze:")) or key.split(":")[0] in live}
         with open(STATE, "w", encoding="utf-8") as f:
@@ -1345,7 +1349,9 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(HERE, "page.html"), encoding="utf-8") as f:
                 return self._send(200, f.read().replace("__TOKEN__", TOKEN), "text/html; charset=utf-8")
         if self.path == "/api/chats":
-            if self.headers.get("X-Chatwatch-App"):
+            # the app delivers the fast alerts only while macOS lets it notify;
+            # otherwise the server keeps sending them itself
+            if self.headers.get("X-Chatwatch-App") and self.headers.get("X-Chatwatch-Notify") != "0":
                 APP_SEEN[0] = time.time()
             with _lock:
                 rows = chats()

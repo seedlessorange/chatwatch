@@ -113,6 +113,10 @@ final class Model: ObservableObject {
     @Published var data: Payload?
     @Published var error: String?
     @Published var updated = Date()
+    /// Whether macOS lets this app post notifications (nil until first asked).
+    @Published var notifyOK: Bool?
+    /// What the last test notification's button did.
+    @Published var testResult: String?
     private var timer: Timer?
 
     init(poll: Bool = true) {
@@ -123,11 +127,24 @@ final class Model: ObservableObject {
         }
     }
 
+    func checkNotify() {
+        UNUserNotificationCenter.current().getNotificationSettings { s in
+            let ok = s.authorizationStatus == .authorized || s.authorizationStatus == .provisional
+            Task { @MainActor in
+                if self.notifyOK != ok { log("notifications allowed now: \(ok)") }
+                self.notifyOK = ok
+            }
+        }
+    }
+
     func refresh() {
+        checkNotify()
         Task {
             do {
                 var req = URLRequest(url: base.appendingPathComponent("api/chats"))
                 req.setValue("1", forHTTPHeaderField: "X-Chatwatch-App")
+                // while macOS blocks this app's notifications, the server sends the alerts itself
+                req.setValue(self.notifyOK == true ? "1" : "0", forHTTPHeaderField: "X-Chatwatch-Notify")
                 let (d, _) = try await URLSession.shared.data(for: req)
                 self.data = try JSONDecoder().decode(Payload.self, from: d)
                 self.error = nil
@@ -160,6 +177,25 @@ final class Model: ObservableObject {
     }
     func copyModelSwitch() { copy("/model opus") }
 
+    /// A harmless notification, alternating between the two button sets, to check that notifications
+    /// show and that each button reaches the app. Their buttons never touch a chat.
+    private var testCount = 0
+    func sendTest() {
+        testResult = nil
+        // one at a time, alternating, so macOS does not stack one under the other
+        let kinds = [("chat", "Test: a chat wasting tokens"), ("fable", "Test: a chat on Fable")]
+        testCount += 1
+        for (cat, title) in [kinds[(testCount - 1) % 2]] {
+            let c = UNMutableNotificationContent()
+            c.title = title
+            c.body = "A test from Chatwatch. Its buttons do nothing to your chats."
+            c.categoryIdentifier = cat
+            c.userInfo = ["pid": 0, "id": "test:" + cat]
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "test:" + cat, content: c, trigger: nil)) { err in
+                log("test notification \(cat) \(err.map { "failed: \($0)" } ?? "ok")")
+            }
+        }
+    }
 
     var alerts: [AlertItem] { data?.alerts ?? [] }
     var urgent: Int { alerts.filter { $0.notify }.count }
@@ -167,6 +203,8 @@ final class Model: ObservableObject {
     /// Posts a notification for each new fast alert. The same alert repeats after an
     /// hour if it is still true (six hours for Fable).
     func deliver() {
+        // nothing would show; leave the alerts unsent so they go out once notifications are allowed
+        guard notifyOK == true else { return }
         let d = UserDefaults.standard
         var sent = d.dictionary(forKey: "notified") as? [String: Double] ?? [:]
         let now = Date().timeIntervalSince1970
@@ -463,6 +501,34 @@ struct SettingsRow: View {
     }
 }
 
+/// Warns when macOS blocks Chatwatch's notifications, and offers a test once they work.
+struct NotifyRow: View {
+    @EnvironmentObject var model: Model
+    var body: some View {
+        if model.notifyOK == false {
+            HStack(spacing: 6) {
+                Image(systemName: "bell.slash.fill").foregroundStyle(.orange)
+                Text("Notifications are off for Chatwatch, so alerts come without buttons.")
+                    .font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Open Settings") {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.chatwatch.menubar")!)
+                }
+                .buttonStyle(.borderless).font(.system(size: 11))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
+        } else if model.notifyOK == true {
+            HStack(spacing: 6) {
+                Text(model.testResult ?? "").font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                Spacer()
+                Button("Send a test notification") { model.sendTest() }
+                    .buttonStyle(.borderless).font(.system(size: 11))
+            }
+        }
+    }
+}
+
 struct AttentionRow: View {
     @EnvironmentObject var model: Model
     let a: AlertItem
@@ -647,6 +713,7 @@ struct Panel: View {
                 Text(err).font(.callout).foregroundStyle(.secondary).padding(.vertical, 20)
             } else if let d = model.data {
                 MetersCard(plan: d.plan)
+                NotifyRow()
                 if let st = d.plan.settings { SettingsRow(info: st) }
                 content(d)
             } else {
@@ -756,6 +823,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         log("action \(action) on \(id)")
         Task { @MainActor in
             let m = Model.shared
+            if id.hasPrefix("test:") {
+                let names = ["handoff": "Handoff and close", "close": "Close now", "snooze": "Snooze 1 hour",
+                             "copy": "Copy /model opus (copied)"]
+                if action == "copy" { m.copyModelSwitch() }
+                m.testResult = "Test notification: \(names[action] ?? "the notification itself") reached Chatwatch."
+                if names[action] == nil { self.showWindow() }
+                done()
+                return
+            }
             switch action {
             case "handoff": m.close(pid, handoff: true)
             case "close": m.close(pid, handoff: false)
