@@ -266,6 +266,9 @@ class Transcript:
         self.title = ""
         self.last_prompt = ""
         self.cache_1h = None  # whether this chat writes the 1-hour or the 5-minute cache
+        self.last_text = ""   # the main chat's last reply, for done_state
+        self.todos = []       # its last TodoWrite list
+        self.tasks = {}       # task id or subject -> status, from TaskCreate and TaskUpdate
 
     def update(self):
         try:
@@ -300,6 +303,8 @@ class Transcript:
                 u = msg.get("usage")
                 if not u or msg.get("model") == "<synthetic>":
                     continue
+                if not m.get("isSidechain"):
+                    self._read_content(msg.get("content"))
                 cc = u.get("cache_creation") or {}
                 if (cc.get("ephemeral_1h_input_tokens") or 0) > 0:
                     self.cache_1h = True
@@ -317,6 +322,52 @@ class Transcript:
                                    u.get("cache_creation_input_tokens", 0) or 0,
                                    u.get("input_tokens", 0) or 0,
                                    u.get("cache_read_input_tokens", 0) or 0)
+
+    def _read_content(self, content):
+        for c in content if isinstance(content, list) else []:
+            if not isinstance(c, dict):
+                continue
+            if c.get("type") == "text" and (c.get("text") or "").strip():
+                self.last_text = c["text"]
+            elif c.get("type") == "tool_use":
+                i, name = c.get("input") or {}, c.get("name")
+                if name == "TodoWrite":
+                    self.todos = i.get("todos") or []
+                elif name == "TaskCreate":
+                    self.tasks[i.get("subject") or c.get("id")] = "pending"
+                elif name == "TaskUpdate" and i.get("status"):
+                    self.tasks[i.get("taskId") or "?"] = i["status"]
+
+
+# Is a chat finished? Read from its last reply, no model call. Her chats end each turn with
+# "committed and pushed" or what is still pending and why, so the closing lines say it.
+DONE_WAITS = re.compile(r"(waits? (for|on) your|until you (answer|reply|say|decide)|your (yes|answer|call|go-ahead)"
+                        r"|tell me (which|whether|if|what)|once you|want me to|should I|shall I|do you want"
+                        r"|which (one|option) do you|\?\s*$)", re.I)
+DONE_LOOSE = re.compile(r"((not|n.t) (yet )?(pushed|merged|committed)|uncommitted|still (pending|to |owed|open)|pending"
+                        r"|left to do|not done|blocked|owed)", re.I)
+DONE_OK = re.compile(r"(committed and pushed|all done|nothing (is )?(left|pending|to commit)|nothing in the repo changed"
+                     r"|that's everything|a fresh chat (would|for)|suggest a fresh chat)", re.I)
+DONE_PILLS = {"done": "Done", "waiting": "Waiting on you", "loose": "Loose ends"}
+
+
+def done_state(t):
+    """(state, closing line): done, waiting (on her answer), loose (open to-dos or unpushed work) or unclear."""
+    text = t.last_text.strip()
+    lines = [l.strip(" -*#`") for l in text.splitlines() if l.strip(" -*#`")]
+    line = lines[-1] if lines else ""
+    end = text[-400:]
+    open_items = ([x for x in t.todos if isinstance(x, dict) and x.get("status") != "completed"]
+                  + [k for k, v in t.tasks.items() if v not in ("completed", "deleted")])
+    if DONE_WAITS.search(end[-300:]):
+        return "waiting", line
+    if open_items:
+        return "loose", f"{len(open_items)} open to-do{'s' if len(open_items) > 1 else ''}. " + line
+    if DONE_LOOSE.search(end[-300:]):
+        return "loose", line
+    if DONE_OK.search(end):
+        return "done", line
+    return "unclear", line
 
 
 _cache = {}
@@ -395,7 +446,9 @@ def chats():
         wake = ctx * (r["cr"] if warm else r["cw"]) / 1e6
         cold_wake = ctx * r["cw"] / 1e6           # the next step once the cache has expired
         cwd = s.get("cwd", "")
+        state, closing = done_state(mt)
         rows.append({
+            "state": state, "closing": closing[:300],
             "pid": s.get("pid"), "sid": sid, "cwd": cwd,
             "folder": os.path.basename(cwd.rstrip("/\\")) or "~",
             "title": mt.title or (mt.last_prompt[:70] if mt.last_prompt else s.get("name") or sid[:8]),
@@ -1216,15 +1269,20 @@ def going_cold(r):
         cold, warm = f"{r['cold_wake_pct']:.2f}% of your {unit_label(r['unit'])}", f"{r['wake_pct']:.3f}%"
     else:
         cold, warm = f"${r['cold_wake_usd']:.2f}", f"${r['wake_usd']:.3f}"
+    done = r.get("state") == "done"
     text = (f"Idle {int(since)} min, holding {r['ctx'] // 1000}K. Its cache expires in {left} min, and after "
             f"that the next message re-pays the whole context: about {cold}, against {warm} while it is warm. "
-            "A handoff now is still cheap.")
+            + ("It looks finished, so letting it go cold costs nothing." if done else "A handoff now is still cheap."))
+    pills = [{"kind": "cold", "pill": f"Cold in {left} min", "text": text, "fix": "" if done else FIXES["cold"]}]
+    if r.get("state") in DONE_PILLS:
+        pills.append({"kind": "state-" + r["state"], "pill": DONE_PILLS[r["state"]],
+                      "text": "Its last reply ends: " + (r.get("closing") or "(no text)"), "fix": ""})
     return {"id": f"{r['sid']}:cold:{int(r.get('last_step') or 0)}", "sid": r["sid"], "pid": r["pid"],
             "kind": "cold", "title": r["title"], "text": text, "reasons": [text],
-            "causes": [{"kind": "cold", "pill": f"Cold in {left} min", "text": text, "fix": FIXES["cold"]}],
+            "causes": pills, "state": r.get("state"), "closing": r.get("closing", ""),
             "fix": "handoff", "cold_in_min": left, "cold_cost_pct": r.get("cold_wake_pct"),
             "cold_cost_usd": r["cold_wake_usd"], "waste_pct_h": None, "waste_usd_h": 0.0, "share": 0.0,
-            "family": r["family"], "busy": False, "subs_active": r["subs_active"], "notify": True}
+            "family": r["family"], "busy": False, "subs_active": r["subs_active"], "notify": not done}
 
 
 def live_alerts(rows):

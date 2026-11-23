@@ -76,6 +76,9 @@ struct AlertItem: Codable, Identifiable {
     let cold_in_min: Int?
     let cold_cost_pct: Double?
     let cold_cost_usd: Double?
+    /// For a cold alert: done, waiting, loose or unclear, read from the chat's last reply.
+    let state: String?
+    let closing: String?
     /// The causes that come with a message to paste into the chat.
     var fixes: [Cause] { (causes ?? []).filter { !($0.fix ?? "").isEmpty } }
 }
@@ -444,6 +447,9 @@ func causeColor(_ kind: String) -> Color {
     case "fable": return .purple
     case "rebuild": return .blue
     case "cold": return .teal
+    case "state-done": return .green
+    case "state-waiting": return .pink
+    case "state-loose": return .orange
     case "jump": return .red
     default: return .orange
     }
@@ -537,9 +543,11 @@ struct AttentionRow: View {
 
     var runaway: Bool { a.kind == "runaway" }
     var cold: Bool { a.kind == "cold" }
+    var finished: Bool { cold && a.state == "done" }
     var color: Color { runaway ? .red : cold ? .teal : .orange }
     var headline: String {
         if runaway { return "Burning fast, mostly on real work" }
+        if finished { return "Looks finished: safe to let it go cold" }
         if cold { return "Cache expires in \(a.cold_in_min ?? 0) min: hand off now" }
         let share = Int(((a.share ?? 0) * 100).rounded())
         return "\(share)% of what it uses is waste"
@@ -585,6 +593,10 @@ struct AttentionRow: View {
                     ForEach(cs, id: \.self) { c in Tag(text: c.pill, color: causeColor(c.kind), filled: true) }
                 }
             }
+            if cold, let line = a.closing, !line.isEmpty {
+                Text(line).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true).help(line)
+            }
             if open {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(a.causes ?? [], id: \.self) { c in
@@ -608,7 +620,9 @@ struct AttentionRow: View {
                         Button(label(c)) { copyFix(c) }.buttonStyle(.bordered)
                     }
                 }
-                if a.fixes.isEmpty {
+                if finished {
+                    Button("Close now") { model.close(a.pid, handoff: false) }.buttonStyle(.borderedProminent)
+                } else if a.fixes.isEmpty {
                     Button("Handoff and close") { model.close(a.pid, handoff: true) }.buttonStyle(.borderedProminent)
                 }
                 Spacer(minLength: 4)

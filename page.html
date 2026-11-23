@@ -177,6 +177,7 @@ function render() {
     return `<div class="alert ${a.kind}">
       <div class="head"><span>${esc(a.title)}</span><span class="rate">${rate}</span></div>
       <div class="line" style="font-size:13.5px">${esc(a.text)}</div>
+      ${a.kind === "cold" && a.state && a.state !== "unclear" ? `<div class="line" style="font-size:13.5px"><b>${{done: "Looks finished", waiting: "Waiting on you", loose: "Loose ends"}[a.state]}.</b> Its last reply ends: ${esc(a.closing || "")}</div>` : ""}
       ${(a.reasons || []).length ? `<ul>${a.reasons.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
       <div class="actions">
         <button class="primary" onclick="ask(${a.pid}, true)">Close + handoff</button>
