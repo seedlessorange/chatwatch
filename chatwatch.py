@@ -76,6 +76,14 @@ BURN_USD_H = 25.0            # the same, in API dollars, until the meter is cali
 CTX_JUMP_MIN = 15            # context growth is measured over this many minutes
 CTX_JUMP = 80_000            # ...and alerts past this much growth
 CTX_JUMP_FLOOR = 150_000     # ...once the chat holds at least this much
+# Waste: usage that better token handling would have saved (see waste_of)
+WASTE_WINDOW_MIN = 30        # measured over this many minutes
+LEAN_CTX = 80_000            # what a fresh chat with a handoff carries
+REBUILD_FLOOR = 30_000       # cache writes past this in one step count as a rebuild
+WASTE_PCT_H = {"week": 0.4, "five_hour": 6.0}   # alert when a chat wastes this much per hour
+WASTE_USD_H = 10.0           # the same in API dollars, until the meter is calibrated
+RUNAWAY_PCT_H = {"week": 3.0, "five_hour": 40.0}  # raw burn that alerts whatever the cause
+RUNAWAY_USD_H = 60.0
 
 # Calibration
 CALIB_HOURS = {"week": 48, "five_hour": 10}   # how far back to look for readings
@@ -220,7 +228,7 @@ class Transcript:
     def __init__(self, path):
         self.path = path
         self.offset = 0
-        self.steps = {}       # message id -> (ts, model, cost, tokens, context, sidechain)
+        self.steps = {}       # message id -> (ts, model, cost, tokens, context, sidechain, output, cache writes)
         self.title = ""
         self.last_prompt = ""
         self.cache_1h = None  # whether this chat writes the 1-hour or the 5-minute cache
@@ -270,7 +278,9 @@ class Transcript:
                 self.steps[key] = (_ts(m.get("timestamp", "")), msg.get("model", ""),
                                    step_cost(msg.get("model", ""), u),
                                    ctx + (u.get("output_tokens", 0) or 0), ctx,
-                                   bool(m.get("isSidechain")))
+                                   bool(m.get("isSidechain")),
+                                   u.get("output_tokens", 0) or 0,
+                                   u.get("cache_creation_input_tokens", 0) or 0)
 
 
 _cache = {}
@@ -317,12 +327,12 @@ def chats():
         ctx, model, last_ts = 0, "", 0.0
         main_steps = sorted(v for v in mt.steps.values() if not v[5])
         if main_steps:
-            last_ts, model, _, _, ctx, _ = main_steps[-1]
+            last_ts, model, _, _, ctx = main_steps[-1][:5]
         hour = day = total = recent = 0.0
         hour_tok = nsteps = subs_active = 0
         for i, t in enumerate([mt] + [transcript(p) for p in subs]):
             active = False
-            for ts, _, c, tok, _, _ in t.steps.values():
+            for ts, _, c, tok, *_ in t.steps.values():
                 total += c
                 nsteps += 1
                 if now - ts < 3600:
@@ -338,6 +348,8 @@ def chats():
         # how much the context grew over the last CTX_JUMP_MIN minutes
         before = [v[4] for v in main_steps if v[0] <= now - CTX_JUMP_MIN * 60]
         ctx_growth = ctx - before[-1] if before else 0
+        waste = waste_of([v for t in [mt] + [transcript(p) for p in subs]
+                          for v in t.steps.values() if now - v[0] < WASTE_WINDOW_MIN * 60])
         busy = s.get("status") == "busy"
         idle_min = 0 if busy else max(0, (now - max(last_ts, (s.get("statusUpdatedAt") or 0) / 1000)) / 60)
         ttl_min = 60 if mt.cache_1h else 5
@@ -356,7 +368,8 @@ def chats():
             "cache_warm": warm, "cache_min": ttl_min, "wake_usd": round(wake, 4),
             # usage per hour at the pace of the last BURN_WINDOW_MIN minutes
             "rate_usd_h": round(recent * 60 / BURN_WINDOW_MIN, 4),
-            "subs_active": subs_active, "ctx_growth": ctx_growth,
+            "subs_active": subs_active, "ctx_growth": ctx_growth, "waste": waste,
+            "waste_usd_h": round(waste["total"] * 60 / WASTE_WINDOW_MIN, 4),
             "started": (s.get("startedAt") or 0) / 1000, "entry": s.get("entrypoint", ""),
             "_cmd": s.get("_cmd", ""),
         })
@@ -369,9 +382,48 @@ def chats():
         r["day_pct"] = round(r["day_usd"] * k, 3) if k else None
         r["wake_pct"] = round(r["wake_usd"] * k, 4) if k else None
         r["rate_pct_h"] = round(r["rate_usd_h"] * k, 3) if k else None
+        r["waste_pct_h"] = round(r["waste_usd_h"] * k, 3) if k else None
         r["advice"] = advice(r)
-    rows.sort(key=lambda r: (-r["hour_usd"], -r["ctx"]))
+    rows.sort(key=lambda r: (-r["waste_usd_h"], -r["rate_usd_h"], -r["hour_usd"]))
     return rows
+
+
+def waste_of(steps):
+    """What better token handling would have saved, over a set of steps:
+    - context: every token re-read beyond LEAN_CTX (what a fresh chat with a
+      handoff carries), priced as a cache read;
+    - rebuild: cache writes past REBUILD_FLOOR in one step mean the cache was
+      rebuilt (idle past its lifetime, or compacted), priced as write minus read;
+    - fable: half of what is left on Fable steps, since Opus costs half.
+    Returns dollars at API rates per cause, the total, and the share of all usage."""
+    cost = ctx_w = reb_w = fab_w = sub_w = 0.0
+    rebuilds = ctx_sum = n = sub_sum = sub_n = 0
+    for v in steps:
+        ts, model, c, tok, ctx, side, out, writes = (list(v) + [0, 0])[:8]
+        r = RATES[family(model)]
+        cost += c
+        n += 1
+        ctx_sum += ctx
+        cw = max(0.0, ctx - LEAN_CTX) * r["cr"] / 1e6
+        rw = 0.0
+        if writes > REBUILD_FLOOR:
+            rebuilds += 1
+            rw = (writes - REBUILD_FLOOR) * (r["cw5"] - r["cr"]) / 1e6
+        cw, rw = min(cw, c), min(rw, max(0.0, c - cw))
+        fw = (c - cw - rw) * 0.5 if family(model) == "fable" else 0.0
+        ctx_w += cw
+        if side:                      # a subagent's own context, which a fresh main chat would not shrink
+            sub_w += cw
+            sub_sum += ctx
+            sub_n += 1
+        reb_w += rw
+        fab_w += fw
+    total = ctx_w + reb_w + fab_w
+    return {"context": round(ctx_w, 4), "rebuild": round(reb_w, 4), "fable": round(fab_w, 4),
+            "total": round(total, 4), "share": round(total / cost, 3) if cost else 0.0,
+            "rebuilds": rebuilds, "avg_ctx": int(ctx_sum / n) if n else 0, "steps": n,
+            "sub_context": round(sub_w, 4), "sub_avg_ctx": int(sub_sum / sub_n) if sub_n else 0,
+            "main_avg_ctx": int((ctx_sum - sub_sum) / (n - sub_n)) if n > sub_n else 0}
 
 
 # ---------------------------------------------------------------- the plan's meters
@@ -507,7 +559,7 @@ def all_steps(since):
                     continue
             except OSError:
                 continue
-            for ts, _, c, _, _, _ in transcript(p).steps.values():
+            for ts, _, c, *_ in transcript(p).steps.values():
                 if ts >= since:
                     out.append((ts, c))
     for p in [p for p in _cache if not os.path.exists(p) or os.path.getmtime(p) < since - 86400]:
@@ -607,12 +659,10 @@ def advice(r):
     idle_h = r["idle_min"] / 60
     if r["family"] == "fable":
         out.append(("model", "On Fable, the heaviest model. Type /model opus in this chat unless it really needs Fable."))
-    if r["ctx"] > CTX_ALERT:
-        out.append(("fresh", f"Holding {r['ctx']//1000}K of context: every step re-reads all of it. Close + handoff and start fresh."))
-    if not r["busy"] and idle_h >= IDLE_PILE_HOURS:
-        why = ("its cache has expired, so waking it rebuilds the whole context"
-               if not r["cache_warm"] else "nothing is running")
-        out.append(("close", f"Idle {idle_h:.0f} h ({why}). Close it if the task is done."))
+    if r["waste"]["share"] >= 0.3 and r["waste_usd_h"] >= 2:
+        reasons = waste_reasons(r)
+        if reasons:
+            out.append(("fresh", reasons[0][1]))
     if r["busy"] and heavy(r):
         used = (f"{r['hour_pct']:.1f}% of your {unit_label(r['unit'])}" if r["hour_pct"] is not None
                 else f"about ${r['hour_usd']:.0f} worth")
@@ -752,7 +802,7 @@ def close_chat(pid, handoff=True):
 
 
 # ---------------------------------------------------------------- alerts
-NOTIFY_KINDS = ("burn", "jump", "fable")   # the fast ones; the menu bar app adds action buttons
+NOTIFY_KINDS = ("waste", "runaway")       # the menu bar app adds action buttons
 APP_SEEN = [0.0]                            # last time the menu bar app asked for data
 
 
@@ -760,38 +810,75 @@ def app_active():
     return time.time() - APP_SEEN[0] < 90
 
 
+def waste_reasons(r):
+    """[(cause, sentence)], biggest cause first, each with its share of the chat's usage."""
+    w = r["waste"]
+    cost = w["total"] / w["share"] if w["share"] else 0
+    pc = lambda x: f"{round(100 * x / cost)}%" if cost else "some"
+    out = []
+    main_ctx = w["context"] - w["sub_context"]
+    if main_ctx > 0:
+        out.append((main_ctx, "context",
+                    f"Re-reads {w['main_avg_ctx'] // 1000}K of context on every step. "
+                    f"A fresh chat with a handoff would save about {pc(main_ctx)} of its usage."))
+    if w["sub_context"] > 0:
+        out.append((w["sub_context"], "subagents",
+                    f"Its subagents re-read {w['sub_avg_ctx'] // 1000}K each per step: "
+                    f"{pc(w['sub_context'])} of its usage. Narrower subagent tasks, or fewer files per subagent, would cut it."))
+    if w["rebuild"] > 0:
+        times = "once" if w["rebuilds"] == 1 else f"{w['rebuilds']} times"
+        out.append((w["rebuild"], "rebuild",
+                    f"Rebuilt its whole cache {times} in {WASTE_WINDOW_MIN} min (after sitting idle, or compacting): "
+                    f"{pc(w['rebuild'])} of its usage."))
+    if w["fable"] > 0:
+        out.append((w["fable"], "fable", f"On Fable: Opus would do the same steps for half ({pc(w['fable'])} of its usage)."))
+    out.sort(key=lambda x: -x[0])
+    # a cause under a tenth of the chat's usage is not worth reading
+    reasons = [(c, t) for amt, c, t in out if not cost or amt / cost >= 0.10]
+    if r["ctx_growth"] >= CTX_JUMP and r["ctx"] >= CTX_JUMP_FLOOR:
+        reasons.insert(0, ("jump", f"Context grew {r['ctx_growth'] // 1000}K in {CTX_JUMP_MIN} min: "
+                                   "large tool outputs or file reads are filling it."))
+    return reasons
+
+
 def live_alerts(rows):
-    """Chats that need a look right now, snoozed ones left out:
-    [{id, sid, pid, kind, title, text, family, busy, notify}], most urgent first."""
+    """Chats burning a lot for bad reasons, snoozed ones left out, worst first:
+    [{id, sid, pid, kind, title, text, reasons, fix, family, busy, notify}].
+    "waste": what better token handling would save is past WASTE_PCT_H.
+    "runaway": raw burn past RUNAWAY_PCT_H, whatever the cause."""
     st = _read_json(STATE) or {}
     now = time.time()
     out = []
-
-    def add(r, kind, text):
+    for r in rows:
+        unit = r["unit"]
+        if r.get("waste_pct_h") is not None:
+            wasteful = r["waste_pct_h"] >= WASTE_PCT_H.get(unit, 0.4)
+            runaway = r["rate_pct_h"] >= RUNAWAY_PCT_H.get(unit, 3.0)
+            rate = f"{r['waste_pct_h']:.1f}% of your {unit_label(unit)} per hour"
+            burn = f"{r['rate_pct_h']:.1f}% of your {unit_label(unit)} per hour"
+        else:
+            wasteful = r["waste_usd_h"] >= WASTE_USD_H
+            runaway = r["rate_usd_h"] >= RUNAWAY_USD_H
+            rate = f"${r['waste_usd_h']:.0f} an hour at API rates"
+            burn = f"${r['rate_usd_h']:.0f} an hour at API rates"
+        if not (wasteful or runaway):
+            continue
+        kind = "waste" if wasteful else "runaway"
         aid = f"{r['sid']}:{kind}"
         if st.get("snooze:" + aid, 0) > now:
-            return
+            continue
+        reasons = waste_reasons(r)
+        subs = f" with {r['subs_active']} subagents" if r["subs_active"] else ""
+        text = (f"Wasting {rate} ({round(100 * r['waste']['share'])}% of what it uses)." if wasteful
+                else f"Burning {burn}{subs}, mostly on real work.")
+        top = reasons[0][0] if reasons else ""
+        fix = ("model" if top == "fable" else "close" if top == "rebuild" and not r["busy"]
+               else "wait" if top == "subagents" else "handoff")
         out.append({"id": aid, "sid": r["sid"], "pid": r["pid"], "kind": kind, "title": r["title"],
-                     "text": text, "family": r["family"], "busy": r["busy"], "notify": kind in NOTIFY_KINDS})
-
-    for r in rows:
-        subs = f", {r['subs_active']} subagents running" if r["subs_active"] else ""
-        if r.get("rate_pct_h") is not None:
-            fast = r["rate_pct_h"] >= BURN_PCT_H.get(r["unit"], 1.0)
-            pace = f"{r['rate_pct_h']:.1f}% of your {unit_label(r['unit'])} per hour"
-        else:
-            fast = r["rate_usd_h"] >= BURN_USD_H
-            pace = f"${r['rate_usd_h']:.0f} an hour at API rates"
-        if fast:
-            add(r, "burn", f"Burning {pace} (last {BURN_WINDOW_MIN} min){subs}.")
-        if r["ctx"] >= CTX_JUMP_FLOOR and r["ctx_growth"] >= CTX_JUMP:
-            add(r, "jump", f"Context grew {r['ctx_growth']//1000}K in {CTX_JUMP_MIN} min, now {r['ctx']//1000}K{subs}.")
-        if r["family"] == "fable" and r["busy"]:
-            add(r, "fable", "Working on Fable, the heaviest model. Switch with /model opus unless it needs Fable.")
-        elif r["family"] == "fable" and r["idle_min"] >= FABLE_IDLE_MIN:
-            add(r, "fable_idle", "Idle on Fable. Its next step is priced as Fable.")
-    order = {"burn": 0, "jump": 1, "fable": 2, "fable_idle": 3}
-    out.sort(key=lambda a: order.get(a["kind"], 9))
+                    "text": text, "reasons": [t for _, t in reasons[:3]], "fix": fix,
+                    "family": r["family"], "busy": r["busy"], "subs_active": r["subs_active"],
+                    "notify": kind in NOTIFY_KINDS})
+    out.sort(key=lambda a: -next(r["waste_usd_h"] for r in rows if r["sid"] == a["sid"]))
     return out
 
 
@@ -816,10 +903,6 @@ def check(rows=None, send=True):
         for a in live_alerts(rows):
             if a["notify"] and due(a["id"]):
                 fresh.append((a["id"], f"{a['title'][:40]}: {a['text']}"))
-    for r in rows:
-        name = r["title"][:40]
-        if r["ctx"] > CTX_ALERT and due(r["sid"] + ":ctx"):
-            fresh.append((r["sid"] + ":ctx", f"{name}: {r['ctx']//1000}K context"))
     plan = plan_summary(rows)
     for meter, m in plan["meters"].items():
         if m["full_at"] and m["resets"] and m["full_at"] < m["resets"] and due("pace:" + meter):

@@ -34,10 +34,15 @@ struct Chat: Codable, Identifiable {
     let rate_pct_h: Double?
     let rate_usd_h: Double?
     let subs_active: Int?
+    let waste_pct_h: Double?
+    let waste_usd_h: Double?
+    let waste: Waste?
     let advice: [[String]]
     let job: Job?
     var id: Int { pid }
 }
+
+struct Waste: Codable { let share: Double; let steps: Int }
 
 struct Meter: Codable {
     let label: String
@@ -56,6 +61,9 @@ struct AlertItem: Codable, Identifiable {
     let text: String
     let busy: Bool
     let notify: Bool
+    let reasons: [String]?
+    let fix: String?
+    let subs_active: Int?
 }
 
 struct Plan: Codable { let why: String?; let unit: String?; let meters: [String: Meter] }
@@ -143,10 +151,10 @@ final class Model: ObservableObject {
             if now - (sent[a.id] ?? 0) < gap { continue }
             sent[a.id] = now
             let c = UNMutableNotificationContent()
-            c.title = (a.kind == "burn" ? "Burning fast: " : a.kind == "jump" ? "Context jumping: " : "On Fable: ") + a.title
-            c.body = a.text
+            c.title = (a.kind == "runaway" ? "Burning fast: " : "Wasting tokens: ") + a.title
+            c.body = a.text + (a.reasons?.first.map { " " + $0 } ?? "")
             c.sound = .default
-            c.categoryIdentifier = a.kind == "fable" ? "fable" : "chat"
+            c.categoryIdentifier = a.fix == "model" ? "fable" : "chat"
             c.userInfo = ["pid": a.pid, "id": a.id]
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: a.id + "@\(Int(now))", content: c, trigger: nil)) { err in
                 log("notify \(a.id) \(err.map { "failed: \($0)" } ?? "ok")")
@@ -282,6 +290,39 @@ struct MeterView: View {
     }
 }
 
+/// A small capsule label that never wraps.
+struct Tag: View {
+    let text: String
+    var color: Color = .secondary
+    var filled = false
+    var body: some View {
+        Text(text)
+            .font(.system(size: 10, weight: .semibold))
+            .lineLimit(1)
+            .padding(.horizontal, 6).padding(.vertical, 1.5)
+            .background(Capsule().fill(filled ? color.opacity(0.15) : Color.clear))
+            .overlay(Capsule().stroke(color.opacity(filled ? 0 : 0.6), lineWidth: 1))
+            .foregroundStyle(color)
+            .fixedSize()
+    }
+}
+
+/// One right-aligned number with its caption, at a fixed width so columns line up.
+struct Num: View {
+    let value: String
+    let caption: String
+    var color: Color = .primary
+    var width: CGFloat = 54
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 1) {
+            Text(value).font(.system(size: 13, weight: .semibold)).monospacedDigit()
+                .foregroundStyle(color).lineLimit(1)
+            Text(caption).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+        }
+        .frame(width: width, alignment: .trailing)
+    }
+}
+
 struct ChatRow: View {
     @EnvironmentObject var model: Model
     let c: Chat
@@ -289,47 +330,34 @@ struct ChatRow: View {
     @State private var confirming = false
     @State private var hover = false
 
+    var share: Double { c.waste?.share ?? 0 }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(c.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                    HStack(spacing: 6) {
-                        Text(c.family.isEmpty ? "?" : c.family)
-                            .font(.system(size: 10, weight: .semibold))
-                            .padding(.horizontal, 5).padding(.vertical, 1)
-                            .overlay(Capsule().stroke(c.family == "fable" ? Color.purple : Color.secondary, lineWidth: 1))
-                            .foregroundStyle(c.family == "fable" ? Color.purple : Color.secondary)
-                        Text(c.busy ? "working" : "idle \(idle(c.idle_min))")
-                            .foregroundStyle(c.busy ? Color.green : Color.secondary)
-                        Text(c.folder).foregroundStyle(.secondary).lineLimit(1)
+            HStack(alignment: .center, spacing: 8) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(c.title).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                    HStack(spacing: 5) {
+                        Tag(text: c.family.isEmpty ? "?" : c.family, color: c.family == "fable" ? .purple : .secondary)
                         if let n = c.subs_active, n > 0 {
-                            Text("\(n) subagents").foregroundStyle(.orange)
+                            Tag(text: "\(n) sub", color: .orange, filled: true)
                         }
+                        Text(c.busy ? "working" : "idle \(idle(c.idle_min))")
+                            .font(.system(size: 11)).lineLimit(1).fixedSize()
+                            .foregroundStyle(c.busy ? Color.green : Color.secondary)
+                        Text(c.folder).font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
+                            .foregroundStyle(.tertiary).layoutPriority(-1)
                     }
-                    .font(.caption)
                 }
-                Spacer(minLength: 4)
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(c.rate_pct_h != nil ? pct(c.rate_pct_h) + "/h" : usd(c.rate_usd_h ?? 0) + "/h")
-                        .font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                    Text("now").font(.caption2).foregroundStyle(.secondary)
-                }
-                .frame(width: 66, alignment: .trailing)
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(c.hour_pct != nil ? pct(c.hour_pct) : usd(c.hour_usd))
-                        .font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                    Text("last hour").font(.caption2).foregroundStyle(.secondary)
-                }
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text(kTok(c.ctx)).font(.system(size: 13, weight: .semibold)).monospacedDigit()
-                        .foregroundStyle(c.ctx > ctxAlert ? Color.orange : Color.primary)
-                    Text("context").font(.caption2).foregroundStyle(.secondary)
-                }
-                .frame(width: 52, alignment: .trailing)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Num(value: c.rate_pct_h != nil ? pct(c.rate_pct_h) + "/h" : usd(c.rate_usd_h ?? 0) + "/h",
+                    caption: "now", width: 64)
+                Num(value: (c.waste?.steps ?? 0) == 0 ? "-" : "\(Int((share * 100).rounded()))%",
+                    caption: "waste", color: share >= 0.4 ? .orange : .primary, width: 42)
+                Num(value: kTok(c.ctx), caption: "context", width: 48)
             }
             if let a = c.advice.first, a.count > 1 {
-                Text(a[1]).font(.caption).foregroundStyle(.secondary)
+                Text(a[1]).font(.system(size: 11)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let j = c.job, let msg = j.msg {
@@ -337,15 +365,12 @@ struct ChatRow: View {
             } else if confirming {
                 HStack(spacing: 6) {
                     Button("Handoff and close") { model.close(c.pid, handoff: true); confirming = false }
-                        .buttonStyle(.borderedProminent).controlSize(.small)
+                        .buttonStyle(.borderedProminent)
                     Button("Close now") { model.close(c.pid, handoff: false); confirming = false }
-                        .controlSize(.small)
-                    Button("Cancel") { confirming = false }.controlSize(.small).buttonStyle(.borderless)
+                    Button("Cancel") { confirming = false }.buttonStyle(.borderless)
                     Spacer()
                 }
-                if c.busy {
-                    Text("It is working right now. Closing stops it mid-task.").font(.caption).foregroundStyle(.red)
-                }
+                .controlSize(.small)
             } else if hover {
                 HStack {
                     Spacer()
@@ -353,7 +378,7 @@ struct ChatRow: View {
                 }
             }
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, 7)
         .padding(.horizontal, 10)
         .background(RoundedRectangle(cornerRadius: 8).fill(hover ? Color.primary.opacity(0.05) : Color.clear))
         .onHover { hover = $0 }
@@ -364,32 +389,56 @@ struct AlertCard: View {
     @EnvironmentObject var model: Model
     let a: AlertItem
 
-    var color: Color { a.kind.hasPrefix("fable") ? .purple : a.kind == "burn" ? .red : .orange }
-    var icon: String { a.kind == "burn" ? "flame.fill" : a.kind == "jump" ? "arrow.up.right" : "sparkles" }
+    var runaway: Bool { a.kind == "runaway" }
+    var color: Color { runaway ? .red : .orange }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: icon).foregroundStyle(color)
+                Image(systemName: runaway ? "flame.fill" : "drop.fill").foregroundStyle(color)
                 Text(a.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                if let n = a.subs_active, n > 0 { Tag(text: "\(n) sub", color: .orange, filled: true) }
+                Spacer(minLength: 0)
             }
-            Text(a.text).font(.caption).fixedSize(horizontal: false, vertical: true)
+            Text(a.text).font(.system(size: 12, weight: .medium)).fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(a.reasons ?? [], id: \.self) { r in
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Circle().fill(color.opacity(0.7)).frame(width: 4, height: 4).offset(y: -2)
+                        Text(r).font(.system(size: 11)).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
             if a.busy {
-                Text("Working right now: closing stops it mid-task.").font(.caption2).foregroundStyle(.secondary)
+                Text("Working right now: closing stops it mid-task.").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
             HStack(spacing: 6) {
-                if a.kind.hasPrefix("fable") {
-                    Button("Copy /model opus") { model.copyModelSwitch() }
+                // the button for the main cause comes first
+                switch a.fix ?? "handoff" {
+                case "model":
+                    Button("Copy /model opus") { model.copyModelSwitch() }.buttonStyle(.borderedProminent)
+                    Button("Handoff and close") { model.close(a.pid, handoff: true) }
+                case "close":
+                    Button("Close now") { model.close(a.pid, handoff: false) }.buttonStyle(.borderedProminent)
+                    Button("Handoff and close") { model.close(a.pid, handoff: true) }
+                case "wait":
+                    Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderedProminent)
+                    Button("Close now") { model.close(a.pid, handoff: false) }
+                default:
+                    Button("Handoff and close") { model.close(a.pid, handoff: true) }.buttonStyle(.borderedProminent)
+                    Button("Close now") { model.close(a.pid, handoff: false) }
                 }
-                Button("Handoff and close") { model.close(a.pid, handoff: true) }.buttonStyle(.borderedProminent)
-                Button("Close now") { model.close(a.pid, handoff: false) }
                 Spacer()
-                Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderless)
+                if a.fix != "wait" {
+                    Button("Snooze 1 h") { model.snooze(a.id) }.buttonStyle(.borderless)
+                }
             }
             .controlSize(.small)
         }
-        .padding(10)
-        .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.08)))
+        .padding(11)
+        .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.18), lineWidth: 1))
     }
 }
 
@@ -410,9 +459,16 @@ struct Panel: View {
                         MeterView(m: d.plan.meters[k]!)
                     }
                 }
-                if !model.alerts.isEmpty {
-                    Divider()
-                    Text("Needs attention").font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                Divider()
+                if model.alerts.isEmpty {
+                    Label("No chat is wasting much right now.", systemImage: "checkmark.circle")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Needs attention").font(.system(size: 12, weight: .semibold))
+                        Text("Usage that better token handling would save, worst first.")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
                     ForEach(model.alerts) { a in AlertCard(a: a) }
                 }
                 Divider()
@@ -459,7 +515,7 @@ struct Panel: View {
             .font(.caption)
         }
         .padding(14)
-        .frame(width: 400)
+        .frame(width: 420)
     }
 }
 
