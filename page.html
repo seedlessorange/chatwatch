@@ -172,17 +172,22 @@ function render() {
         </div>`).join("");
   const al = data.alerts || [];
   $("#alerts").innerHTML = al.length ? `<h2 style="font-size:16px;margin:18px 0 8px">Needs attention</h2>` + al.map(a => {
-    const rate = a.kind === "cold" ? (a.cold_cost_pct != null ? pct(a.cold_cost_pct) : usd(a.cold_cost_usd || 0)) + " to resume cold"
+    const rate = a.kind === "finished" ? (a.state === "waiting" ? "needs your answer" : "more to do")
+      : a.kind === "cold" ? (a.cold_cost_pct != null ? pct(a.cold_cost_pct) : usd(a.cold_cost_usd || 0)) + " to resume cold"
       : a.waste_pct_h != null ? pct(a.waste_pct_h) + " wasted per hour" : usd(a.waste_usd_h || 0) + " wasted per hour";
     return `<div class="alert ${a.kind}">
       <div class="head"><span>${a.jump ? `<a href="#" onclick="jump('${esc(a.sid)}'); return false" title="Open this chat" style="color:inherit">${esc(a.title)}</a>` : esc(a.title)}</span><span class="rate">${rate}</span></div>
       <div class="line" style="font-size:13.5px">${esc(a.text)}</div>
       ${a.kind === "cold" && a.state && a.state !== "unclear" ? `<div class="line" style="font-size:13.5px"><b>${{done: "Looks finished", waiting: "Waiting on you", loose: "Loose ends"}[a.state]}.</b> Its last reply ends: ${esc(a.closing || "")}</div>` : ""}
       ${(a.reasons || []).length ? `<ul>${a.reasons.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
-      <div class="actions">
+      <div class="actions">${a.kind === "finished" ? `
+        ${a.state === "waiting" ? `<button class="primary" onclick="jump('${esc(a.sid)}')">Open the chat</button>`
+          : `<button class="${a.handoff_ok ? "" : "primary"}" onclick="continueChat('${esc(a.sid)}')" title="Copies continue, then opens the chat: paste and press Enter">Continue</button>`}
+        <button class="${a.handoff_ok && a.state !== "waiting" ? "primary" : ""}" onclick="ask(${a.pid}, true, true)">Handoff into a new chat</button>
+        <button onclick="snooze('${esc(a.id)}')">Snooze 1 h</button>` : `
         <button class="primary" onclick="ask(${a.pid}, true)">Close + handoff</button>
         <button onclick="ask(${a.pid}, false)">Close, no handoff</button>
-        <button onclick="snooze('${esc(a.id)}')">Snooze 1 h</button>
+        <button onclick="snooze('${esc(a.id)}')">Snooze 1 h</button>`}
       </div></div>`; }).join("") : "";
   $("#stats").innerHTML = [
     [cal ? pct(hourPct) : usd(hour), cal ? `of your ${unitName}, last hour` : "used in the last hour, all chats"],
@@ -237,26 +242,31 @@ function render() {
   $("#list").innerHTML = html || `<div class="chat">No open chats.</div>`;
 }
 
-function ask(pid, handoff) {
+function ask(pid, handoff, reopen) {
   const c = data.chats.find(x => x.pid === pid);
   if (!c) return;
   const p = data.plan || {}, unitName = p.unit && p.meters[p.unit] ? p.meters[p.unit].label : "limit";
   $("#dlg-title").textContent = handoff ? "Close with a handoff note?" : "Close without a handoff?";
   $("#dlg-body").innerHTML =
     `<p><b>${esc(c.title)}</b> (${esc(c.folder)})</p>` +
-    (handoff ? `<p>A copy of the chat writes a handoff note on ${esc(c.family)}. That is one step, about ${c.wake_pct != null ? pct(c.wake_pct) + " of your " + unitName : usd(c.wake_usd) + " worth"}. Then the chat stops, and the line to start a fresh chat goes on your clipboard.</p>`
+    (handoff ? `<p>A copy of the chat writes a handoff note on ${esc(c.family)}. That is one step, about ${c.wake_pct != null ? pct(c.wake_pct) + " of your " + unitName : usd(c.wake_usd) + " worth"}. Then the chat stops, and ${reopen ? "a new chat opens in the same window with the line to start it typed in" : "the line to start a fresh chat goes on your clipboard"}.</p>`
              : `<p>The chat stops now. You can reopen it later with <code>claude --resume</code>.</p>`) +
     (c.busy ? `<p class="hot">It is working right now. Closing stops it mid-task.</p>` : "");
   $("#dlg-ok").textContent = handoff ? "Write handoff and close" : "Close it";
   $("#dlg-ok").onclick = async () => {
     $("#dlg").close();
     await fetch("/api/close", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN },
-                                body: JSON.stringify({ pid, handoff }) });
+                                body: JSON.stringify({ pid, handoff, reopen: !!reopen }) });
     load();
   };
   $("#dlg").showModal();
 }
 $("#dlg-cancel").onclick = () => $("#dlg").close();
+
+async function continueChat(sid) {
+  try { await navigator.clipboard.writeText("continue"); } catch (e) {}
+  jump(sid);
+}
 
 function jump(sid) {
   fetch("/api/jump", { method: "POST", headers: { "Content-Type": "application/json", "X-Token": TOKEN },

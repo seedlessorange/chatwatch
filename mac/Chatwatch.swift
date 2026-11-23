@@ -81,6 +81,8 @@ struct AlertItem: Codable, Identifiable {
     let cold_cost_usd: Double?
     let sid: String?
     let jump: String?
+    /// For a finished alert: big enough that a handoff into a new chat beats Continue.
+    let handoff_ok: Bool?
     /// For a cold alert: done, waiting, loose or unclear, read from the chat's last reply.
     let state: String?
     let closing: String?
@@ -177,7 +179,15 @@ final class Model: ObservableObject {
         }
     }
 
-    func close(_ pid: Int, handoff: Bool) { post("api/close", ["pid": pid, "handoff": handoff]) }
+    func close(_ pid: Int, handoff: Bool, reopen: Bool = false) {
+        post("api/close", ["pid": pid, "handoff": handoff, "reopen": reopen])
+    }
+    /// A VS Code chat that is already open takes no text from outside, so this opens it with
+    /// "continue" on the clipboard: paste and press Enter.
+    func continueChat(_ sid: String?) {
+        copy("continue")
+        jump(sid)
+    }
     func snooze(_ id: String, hours: Double = 1) { post("api/snooze", ["id": id, "hours": hours]) }
     /// Brings the chat's VS Code window and tab to the front (the server picks the window).
     func jump(_ sid: String?) {
@@ -226,18 +236,29 @@ final class Model: ObservableObject {
             if now - (sent[a.id] ?? 0) < gap { continue }
             sent[a.id] = now
             let c = UNMutableNotificationContent()
-            c.title = (a.kind == "runaway" ? "Burning fast: " : a.kind == "cold" ? "Going cold: " : "Wasting tokens: ") + a.title
-            c.body = a.kind == "cold" ? a.text : a.text + (a.reasons?.first.map { " " + $0 } ?? "")
+            let fin = a.kind == "finished"
+            c.title = alertTitle(a) + a.title
+            c.body = a.kind == "cold" || fin ? a.text : a.text + (a.reasons?.first.map { " " + $0 } ?? "")
             c.sound = .default
             let fix = a.fixes.first?.fix ?? ""
-            c.categoryIdentifier = fix.isEmpty ? "plain" : "chat"
-            c.userInfo = ["pid": a.pid, "id": a.id, "fix": fix]
+            c.categoryIdentifier = fin ? (a.state == "waiting" ? "answer" : a.handoff_ok == true ? "followupBig" : "followup")
+                : fix.isEmpty ? "plain" : "chat"
+            c.userInfo = ["pid": a.pid, "id": a.id, "fix": fix, "sid": a.sid ?? "", "kind": a.kind]
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: a.id + "@\(Int(now))", content: c, trigger: nil)) { err in
                 log("notify \(a.id) \(err.map { "failed: \($0)" } ?? "ok")")
             }
         }
         sent = sent.filter { now - $0.value < 86400 }
         d.set(sent, forKey: "notified")
+    }
+
+    func alertTitle(_ a: AlertItem) -> String {
+        switch a.kind {
+        case "runaway": return "Burning fast: "
+        case "cold": return "Going cold: "
+        case "finished": return a.state == "waiting" ? "Needs your answer: " : "Finished, more to do: "
+        default: return "Wasting tokens: "
+        }
     }
 
     /// The meter per-chat shares are counted against, or the fullest one.
@@ -472,6 +493,7 @@ func causeColor(_ kind: String) -> Color {
     case "state-done": return .green
     case "state-waiting": return .pink
     case "state-loose": return .orange
+    case "context": return .orange
     case "jump": return .red
     default: return .orange
     }
@@ -496,6 +518,7 @@ struct Num: View {
 /// How many of the usage settings in SETTINGS-ADVICE.md are in place, with the advice to copy.
 struct SettingsRow: View {
     let info: SettingsInfo
+    var dismiss: () -> Void = {}
     @State private var copied = false
     var done: Int { info.checks.filter { $0.ok }.count }
     var all: Bool { done == info.checks.count }
@@ -515,6 +538,12 @@ struct SettingsRow: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
                 }
                 .buttonStyle(.borderless).font(.system(size: 11)).disabled(info.advice.isEmpty)
+                if all {
+                    Button { withAnimation { dismiss() } } label: {
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
+                    }
+                    .buttonStyle(.borderless).help("Hide this and the test notification line until a setting goes missing")
+                }
             }
             if !all {
                 ForEach(info.checks.filter { !$0.ok }, id: \.self) { c in
@@ -566,15 +595,19 @@ struct AttentionRow: View {
     var runaway: Bool { a.kind == "runaway" }
     var cold: Bool { a.kind == "cold" }
     var finished: Bool { cold && a.state == "done" }
-    var color: Color { runaway ? .red : cold ? .teal : .orange }
+    var followup: Bool { a.kind == "finished" }
+    var waiting: Bool { a.state == "waiting" }
+    var color: Color { runaway ? .red : cold ? .teal : followup ? .blue : .orange }
     var headline: String {
         if runaway { return "Burning fast, mostly on real work" }
+        if followup { return waiting ? "Finished its turn: needs your answer" : "Finished its turn: more to do" }
         if finished { return "Looks finished: safe to let it go cold" }
         if cold { return "Cache expires in \(a.cold_in_min ?? 0) min: hand off now" }
         let share = Int(((a.share ?? 0) * 100).rounded())
         return "\(share)% of what it uses is waste"
     }
     var rate: String {
+        if followup { return "" }
         if cold {
             if let p = a.cold_cost_pct { return pct(p) }
             return usd(a.cold_cost_usd ?? 0)
@@ -589,6 +622,11 @@ struct AttentionRow: View {
                      "fable": "Fable", "rebuild": "rebuild", "cold": "handoff"]
         return "Copy fix: " + (names[c.kind] ?? c.kind)
     }
+    func continueIt() {
+        model.continueChat(a.sid)
+        withAnimation { copied = "continue" }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) { withAnimation { if copied == "continue" { copied = nil } } }
+    }
     func copyFix(_ c: Cause) {
         model.copy(c.fix ?? "")
         withAnimation { copied = c.kind }
@@ -598,7 +636,7 @@ struct AttentionRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 6) {
-                Image(systemName: runaway ? "flame.fill" : cold ? "snowflake" : "drop.fill").font(.system(size: 11)).foregroundStyle(color)
+                Image(systemName: runaway ? "flame.fill" : cold ? "snowflake" : followup ? "checkmark.circle.fill" : "drop.fill").font(.system(size: 11)).foregroundStyle(color)
                 Text(a.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     .jumpable(a.jump) { model.jump(a.sid) }
                 if let n = a.subs_active, n > 0 { Tag(text: "\(n) sub", color: .orange, filled: true) }
@@ -616,7 +654,7 @@ struct AttentionRow: View {
                     ForEach(cs, id: \.self) { c in Tag(text: c.pill, color: causeColor(c.kind), filled: true) }
                 }
             }
-            if cold, let line = a.closing, !line.isEmpty {
+            if cold || followup, let line = a.closing, !line.isEmpty {
                 Text(line).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
                     .fixedSize(horizontal: false, vertical: true).help(line)
             }
@@ -643,13 +681,24 @@ struct AttentionRow: View {
                         Button(label(c)) { copyFix(c) }.buttonStyle(.bordered)
                     }
                 }
-                if finished {
+                if followup {
+                    if waiting {
+                        Button("Open the chat") { model.jump(a.sid) }.buttonStyle(.borderedProminent)
+                    } else if a.handoff_ok == true {
+                        Button("Handoff into a new chat") { model.close(a.pid, handoff: true, reopen: true) }
+                            .buttonStyle(.borderedProminent)
+                        Button("Continue") { continueIt() }.buttonStyle(.bordered)
+                    } else {
+                        Button("Continue") { continueIt() }.buttonStyle(.borderedProminent)
+                    }
+                } else if finished {
                     Button("Close now") { model.close(a.pid, handoff: false) }.buttonStyle(.borderedProminent)
                 } else if a.fixes.isEmpty {
                     Button("Handoff and close") { model.close(a.pid, handoff: true) }.buttonStyle(.borderedProminent)
                 }
                 Spacer(minLength: 4)
                 Menu("Close") {
+                    if followup { Button("Handoff into a new chat") { model.close(a.pid, handoff: true, reopen: true) } }
                     Button("Handoff and close") { model.close(a.pid, handoff: true) }
                     Button("Close now") { model.close(a.pid, handoff: false) }
                 }
@@ -658,7 +707,10 @@ struct AttentionRow: View {
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .controlSize(.small).tint(coral)
-            if copied != nil {
+            if copied == "continue" {
+                Text("\"continue\" is on your clipboard: paste it into the chat and press Enter.")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            } else if copied != nil {
                 Text("Copied. Paste it into that chat.").font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }
@@ -733,6 +785,7 @@ struct Panel: View {
     @EnvironmentObject var model: Model
     var scrolls = true
     @State private var showAll = false
+    @AppStorage("hideSetupRows") private var hideSetup = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -751,8 +804,10 @@ struct Panel: View {
                 Text(err).font(.callout).foregroundStyle(.secondary).padding(.vertical, 20)
             } else if let d = model.data {
                 MetersCard(plan: d.plan)
-                NotifyRow()
-                if let st = d.plan.settings { SettingsRow(info: st) }
+                // once everything is in place, both rows can be dismissed; a missing setting brings them back
+                let allSet = d.plan.settings.map { s in s.checks.allSatisfy { $0.ok } } ?? true
+                if !(allSet && hideSetup) || model.notifyOK == false { NotifyRow() }
+                if let st = d.plan.settings, !(allSet && hideSetup) { SettingsRow(info: st) { hideSetup = true } }
                 content(d)
             } else {
                 ProgressView().frame(maxWidth: .infinity).padding()
@@ -782,8 +837,9 @@ struct Panel: View {
                 HStack {
                     Text("Needs attention").font(.system(size: 13, weight: .semibold))
                     Spacer()
-                    Text(model.alerts.allSatisfy { $0.kind == "cold" } ? "cost to resume cold"
-                         : model.alerts.contains { $0.kind == "cold" } ? "wasted per hour, or to resume cold"
+                    let costed = model.alerts.filter { $0.kind != "finished" }
+                    Text(costed.isEmpty ? "" : costed.allSatisfy { $0.kind == "cold" } ? "cost to resume cold"
+                         : costed.contains { $0.kind == "cold" } ? "wasted per hour, or to resume cold"
                          : "wasted per hour").font(.system(size: 10)).foregroundStyle(.tertiary)
                 }
                 ForEach(model.alerts) { a in AttentionRow(a: a) }
@@ -835,10 +891,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let snooze = UNNotificationAction(identifier: "snooze", title: "Snooze 1 hour", options: [])
         let copyFix = UNNotificationAction(identifier: "copyfix", title: "Copy fix", options: [])
         let copy = UNNotificationAction(identifier: "copy", title: "Copy /model opus", options: [])
+        let cont = UNNotificationAction(identifier: "continue", title: "Continue", options: [])
+        let openIt = UNNotificationAction(identifier: "open", title: "Open the chat", options: [])
+        let handNew = UNNotificationAction(identifier: "handoffnew", title: "Handoff into a new chat", options: [])
         c.setNotificationCategories([
             UNNotificationCategory(identifier: "chat", actions: [copyFix, handoff, close, snooze], intentIdentifiers: []),
             UNNotificationCategory(identifier: "plain", actions: [handoff, close, snooze], intentIdentifiers: []),
             UNNotificationCategory(identifier: "fable", actions: [copy, handoff, snooze], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "followup", actions: [cont, handNew, snooze], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "followupBig", actions: [handNew, cont, snooze], intentIdentifiers: []),
+            UNNotificationCategory(identifier: "answer", actions: [openIt, handNew, snooze], intentIdentifiers: []),
         ])
         c.requestAuthorization(options: [.alert, .sound, .badge]) { ok, err in
             log("notifications allowed: \(ok) \(err.map { "\($0)" } ?? "")")
@@ -857,6 +919,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let pid = info["pid"] as? Int ?? 0
         let id = info["id"] as? String ?? ""
         let fix = info["fix"] as? String ?? ""
+        let sid = info["sid"] as? String ?? ""
+        let kind = info["kind"] as? String ?? ""
         let action = r.actionIdentifier
         log("action \(action) on \(id)")
         Task { @MainActor in
@@ -876,7 +940,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             case "snooze": m.snooze(id)
             case "copyfix": if !fix.isEmpty { m.copy(fix) }
             case "copy": m.copyModelSwitch()
-            default: self.showWindow()
+            case "continue": m.continueChat(sid)
+            case "open": m.jump(sid)
+            case "handoffnew": m.close(pid, handoff: true, reopen: true)
+            default: if kind == "finished" { m.jump(sid) } else { self.showWindow() }
             }
             done()
         }

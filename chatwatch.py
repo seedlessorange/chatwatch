@@ -43,6 +43,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -94,6 +95,9 @@ PLAN_TTL = 240               # ask Anthropic at most this often (seconds)
 # Going cold: a big chat on the 1-hour cache, idle long enough that the cache is about to expire
 COLD_CTX = 200_000           # context at least this
 COLD_WARN_MIN = 50           # warn once it has been idle this long (the cache lasts 60)
+# Finished with a follow-up: a chat whose turn just ended with loose ends or a question for her
+FINISHED_MIN = 30            # stays in the panel this long after the turn ends (cold takes over at 50)
+HANDOFF_CTX = 150_000        # from this much context, offer a handoff into a new chat beside Continue
 
 # How much each token type moves the plan meter, per million tokens, per model.
 # Fitted against the weekly meter (python3 chatwatch.py fit): on one Max account,
@@ -341,7 +345,7 @@ class Transcript:
 
 # Is a chat finished? Read from its last reply, no model call. Her chats end each turn with
 # "committed and pushed" or what is still pending and why, so the closing lines say it.
-DONE_WAITS = re.compile(r"(waits? (for|on) your|until you (answer|reply|say|decide)|your (yes|answer|call|go-ahead)"
+DONE_WAITS = re.compile(r"(waits? (for|on) your|blocked on you|needs? your (answer|call|yes|decision)|until you (answer|reply|say|decide)|your (yes|answer|call|go-ahead)"
                         r"|tell me (which|whether|if|what)|once you|want me to|should I|shall I|do you want"
                         r"|which (one|option) do you|\?\s*$)", re.I)
 DONE_LOOSE = re.compile(r"((not|n.t) (yet )?(pushed|merged|committed)|uncommitted|still (pending|to |owed|open)|pending"
@@ -355,7 +359,7 @@ def done_state(t):
     """(state, closing line): done, waiting (on her answer), loose (open to-dos or unpushed work) or unclear."""
     text = t.last_text.strip()
     lines = [l.strip(" -*#`") for l in text.splitlines() if l.strip(" -*#`")]
-    line = lines[-1] if lines else ""
+    line = re.sub(r"\*\*|`", "", lines[-1]) if lines else ""   # markdown marks read as noise in the panel
     end = text[-400:]
     open_items = ([x for x in t.todos if isinstance(x, dict) and x.get("status") != "completed"]
                   + [k for k, v in t.tasks.items() if v not in ("completed", "deleted")])
@@ -1157,6 +1161,42 @@ def write_handoff(row, timeout=600):
     return path
 
 
+def finished(r):
+    """A chat that finished its turn with a follow-up (loose ends, or a question for her): the alert, or None."""
+    if r["busy"] or r.get("subs_active") or r.get("state") not in ("loose", "waiting"):
+        return None
+    since = r.get("since_step_min") or 0
+    if not r.get("last_step") or since >= FINISHED_MIN:
+        return None
+    waiting = r["state"] == "waiting"
+    text = ("Finished its turn and needs your answer." if waiting else
+            "Finished its turn with loose ends.") + " It ends: " + (r.get("closing") or "(no text)")
+    big = r["ctx"] >= HANDOFF_CTX
+    pill = {"kind": "state-" + r["state"], "pill": DONE_PILLS[r["state"]], "text": text, "fix": ""}
+    return {"id": f"{r['sid']}:finished:{int(r['last_step'])}", "sid": r["sid"], "pid": r["pid"],
+            "kind": "finished", "title": r["title"], "text": text, "reasons": [text],
+            "causes": [pill] + ([{"kind": "context", "pill": f"Context {r['ctx'] // 1000}K", "fix": "",
+                                  "text": "Big enough that a fresh chat from a handoff note is cheaper to carry on in."}]
+                                if big else []),
+            "fix": "", "state": r["state"], "closing": r.get("closing", ""), "handoff_ok": big,
+            "waste_pct_h": None, "waste_usd_h": 0.0, "share": 0.0, "family": r["family"], "busy": False,
+            "subs_active": r["subs_active"], "notify": True, "jump": r.get("jump", "")}
+
+
+def focus_window(cwd):
+    """VS Code sends a link to the window that was last in front, so bring forward the one
+    for this folder first (each window's chats share its folder)."""
+    if MAC and os.path.isdir(cwd):
+        subprocess.run(["open", "-a", "Visual Studio Code", cwd], timeout=10)
+        time.sleep(1.5)
+
+
+def new_chat_with(cwd, prompt):
+    """Open a new VS Code chat in the folder's window with the prompt typed in, not sent."""
+    focus_window(cwd)
+    open_path("vscode://anthropic.claude-code/open?" + urllib.parse.urlencode({"prompt": prompt}))
+
+
 def jump_to(sid):
     """Bring a VS Code chat's tab to the front. The link goes to whichever VS Code window was
     last in front, and a window that doesn't hold the chat opens an empty new one instead, so
@@ -1164,14 +1204,12 @@ def jump_to(sid):
     row = next((r for r in chats() if r["sid"] == sid and r.get("jump")), None)
     if not row:
         return False
-    if MAC and os.path.isdir(row["cwd"]):
-        subprocess.run(["open", "-a", "Visual Studio Code", row["cwd"]], timeout=10)
-        time.sleep(1.5)
+    focus_window(row["cwd"])
     open_path(row["jump"])
     return True
 
 
-def close_chat(pid, handoff=True):
+def close_chat(pid, handoff=True, reopen=False):
     row = next((r for r in chats() if r["pid"] == pid), None)
     if not row:
         jobs[pid] = {"state": "error", "msg": "That chat is no longer open."}
@@ -1186,10 +1224,14 @@ def close_chat(pid, handoff=True):
         if s.get("sessionId") != row["sid"]:
             raise RuntimeError("that process no longer belongs to this chat; not stopping it")
         stop_pid(pid)
-        copied = path and copy_text(f"Continue the work from the handoff note at {path}. "
-                                    "Read it first, then check git status before changing anything.")
+        line = (f"Continue the work from the handoff note at {path}. "
+                "Read it first, then check git status before changing anything.")
+        copied = path and copy_text(line)
         msg = "Closed."
-        if path:
+        if path and reopen and row.get("jump"):
+            new_chat_with(row["cwd"], line)
+            msg += " Handoff saved; a new chat is open with the line to start it typed in. Press Enter."
+        elif path:
             msg += (" Handoff saved; the line to start a new chat is on your clipboard."
                     if copied else f" Handoff saved to {path}.")
         jobs[pid] = {"state": "done", "path": path, "msg": msg}
@@ -1307,7 +1349,8 @@ def live_alerts(rows):
     [{id, sid, pid, kind, title, text, reasons, fix, family, busy, notify}].
     "waste": what better token handling would save is past WASTE_PCT_H.
     "runaway": raw burn past RUNAWAY_PCT_H, whatever the cause.
-    "cold": a big idle chat whose 1-hour cache expires within minutes (see going_cold)."""
+    "cold": a big idle chat whose 1-hour cache expires within minutes (see going_cold).
+    "finished": a chat whose turn just ended with loose ends or a question (see finished)."""
     st = _read_json(STATE) or {}
     now = time.time()
     out = []
@@ -1315,6 +1358,9 @@ def live_alerts(rows):
         cold = going_cold(r)
         if cold and st.get("snooze:" + cold["id"], 0) <= now:
             out.append(cold)
+        fin = finished(r)
+        if fin and st.get("snooze:" + fin["id"], 0) <= now:
+            out.append(fin)
         unit = r["unit"]
         if r.get("waste_pct_h") is not None:
             wasteful = r["waste_pct_h"] >= WASTE_PCT_H.get(unit, 0.4)
@@ -1456,7 +1502,8 @@ class Handler(BaseHTTPRequestHandler):
             if jobs.get(pid, {}).get("state") == "running":
                 return self._send(409, '{"error":"already closing"}')
             jobs[pid] = {"state": "running", "msg": "Starting..."}
-            threading.Thread(target=close_chat, args=(pid, bool(body.get("handoff", True))),
+            threading.Thread(target=close_chat, args=(pid, bool(body.get("handoff", True)),
+                                                      bool(body.get("reopen", False))),
                              daemon=True).start()
             return self._send(200, '{"ok":true}')
         if self.path == "/api/jump":
