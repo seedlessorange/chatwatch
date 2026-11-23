@@ -83,6 +83,9 @@ struct AlertItem: Codable, Identifiable {
     let jump: String?
     /// For a finished alert: big enough that a handoff into a new chat beats Continue.
     let handoff_ok: Bool?
+    /// For notifications: a few words, then one short line and a tip.
+    let headline: String?
+    let short: String?
     /// For a cold alert: done, waiting, loose or unclear, read from the chat's last reply.
     let state: String?
     let closing: String?
@@ -206,12 +209,14 @@ final class Model: ObservableObject {
     func sendTest() {
         testResult = nil
         // one at a time, alternating, so macOS does not stack one under the other
-        let kinds = [("chat", "Test: a chat wasting tokens"), ("fable", "Test: a chat on Fable")]
+        let kinds = [("chat", "Test chat (its buttons do nothing)"), ("fable", "Test chat on Fable (its buttons do nothing)")]
         testCount += 1
         for (cat, title) in [kinds[(testCount - 1) % 2]] {
             let c = UNMutableNotificationContent()
-            c.title = title
-            c.body = "A test from Chatwatch. Its buttons do nothing to your chats."
+            c.title = cat == "fable" ? "Burning fast" : "Wasting tokens"
+            c.subtitle = title
+            c.body = cat == "fable" ? "Uses 3.1% of your weekly limit an hour, 3 subagents.\nTip: /model opus"
+                : "Wastes 0.4% of your weekly limit an hour (37% of what it uses).\nTip: hand off to a fresh chat"
             c.categoryIdentifier = cat
             c.userInfo = ["pid": 0, "id": "test:" + cat]
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "test:" + cat, content: c, trigger: nil)) { err in
@@ -237,8 +242,14 @@ final class Model: ObservableObject {
             sent[a.id] = now
             let c = UNMutableNotificationContent()
             let fin = a.kind == "finished"
-            c.title = alertTitle(a) + a.title
-            c.body = a.kind == "cold" || fin ? a.text : a.text + (a.reasons?.first.map { " " + $0 } ?? "")
+            if let h = a.headline, let sh = a.short {
+                c.title = h
+                c.subtitle = a.title
+                c.body = sh
+            } else {
+                c.title = alertTitle(a) + a.title
+                c.body = a.kind == "cold" || fin ? a.text : a.text + (a.reasons?.first.map { " " + $0 } ?? "")
+            }
             c.sound = .default
             let fix = a.fixes.first?.fix ?? ""
             c.categoryIdentifier = fin ? (a.state == "waiting" ? "answer" : a.handoff_ok == true ? "followupBig" : "followup")
@@ -993,6 +1004,12 @@ struct ChatwatchApp: App {
 enum Main {
     static func main() {
         let args = CommandLine.arguments
+        // Posts the test notification, for checking how a banner reads: Chatwatch --notify-test
+        if args.contains("--notify-test") {
+            MainActor.assumeIsolated { let m = Model(poll: false); m.sendTest(); m.sendTest() }   // no polling, so no real alerts go out
+            RunLoop.main.run(until: Date().addingTimeInterval(1.5))
+            return
+        }
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
             MainActor.assumeIsolated { snapshot(to: args[i + 1]) }
             return

@@ -1344,6 +1344,45 @@ def going_cold(r):
             "jump": r.get("jump", "")}
 
 
+# What a notification says: a few words of headline, the chat in the subtitle, one short line,
+# and one thing to do. The full sentences stay in the panel's Why.
+TIPS = {"fable": "Tip: /model opus", "context": "Tip: hand off to a fresh chat",
+        "subagents": "Tip: let the subagents finish", "rebuild": "Tip: close it when it is done",
+        "jump": "Tip: check what it is reading"}
+
+
+def _short_rate(x_pct, x_usd, unit):
+    return f"{x_pct:.1f}% of your {unit_label(unit)} an hour" if x_pct is not None else f"${x_usd:.0f} an hour"
+
+
+def notice(a, r):
+    """Adds headline and short (one line, then a tip) to an alert, for notifications."""
+    k = a["kind"]
+    if k == "cold":
+        a["headline"] = f"Going cold in {a['cold_in_min']} min"
+        a["short"] = ("Looks finished, so you can let it go." if r.get("state") == "done"
+                      else "Hand off now; resuming later re-pays " +
+                      (f"{a['cold_cost_pct']:.2f}%." if a.get("cold_cost_pct") is not None
+                       else f"${a['cold_cost_usd']:.2f}."))
+    elif k == "finished":
+        a["headline"] = "Needs your answer" if a["state"] == "waiting" else "Finished, more to do"
+        line = a.get("closing") or ""
+        a["short"] = line if len(line) <= 110 else line[:107].rsplit(" ", 1)[0] + "..."
+    else:
+        top = (a.get("causes") or [{}])[0].get("kind", "")
+        subs = f", {r['subs_active']} subagents" if r["subs_active"] else ""
+        if k == "waste":
+            a["headline"] = "Wasting tokens"
+            a["short"] = ("Wastes " + _short_rate(r.get("waste_pct_h"), r["waste_usd_h"], r["unit"])
+                          + f" ({round(100 * r['waste']['share'])}% of what it uses)")
+        else:
+            a["headline"] = "Burning fast"
+            a["short"] = "Uses " + _short_rate(r.get("rate_pct_h"), r.get("rate_usd_h", 0), r["unit"]) + subs
+        if top in TIPS:
+            a["short"] += ".\n" + TIPS[top]
+    return a
+
+
 def live_alerts(rows):
     """Chats burning a lot for bad reasons, snoozed ones left out, worst first:
     [{id, sid, pid, kind, title, text, reasons, fix, family, busy, notify}].
@@ -1357,10 +1396,10 @@ def live_alerts(rows):
     for r in rows:
         cold = going_cold(r)
         if cold and st.get("snooze:" + cold["id"], 0) <= now:
-            out.append(cold)
+            out.append(notice(cold, r))
         fin = finished(r)
         if fin and st.get("snooze:" + fin["id"], 0) <= now:
-            out.append(fin)
+            out.append(notice(fin, r))
         unit = r["unit"]
         if r.get("waste_pct_h") is not None:
             wasteful = r["waste_pct_h"] >= WASTE_PCT_H.get(unit, 0.4)
@@ -1391,6 +1430,7 @@ def live_alerts(rows):
                     "share": r["waste"]["share"],
                     "family": r["family"], "busy": r["busy"], "subs_active": r["subs_active"],
                     "notify": kind in NOTIFY_KINDS})
+        notice(out[-1], r)
     # going cold first: it only helps in the next few minutes
     out.sort(key=lambda a: (a["kind"] != "cold", -next(r["waste_usd_h"] for r in rows if r["sid"] == a["sid"])))
     return out
@@ -1416,7 +1456,7 @@ def check(rows=None, send=True):
     if not app_active():
         for a in live_alerts(rows):
             if a["notify"] and due(a["id"]):
-                fresh.append((a["id"], f"{a['title'][:40]}: {a['text']}"))
+                fresh.append((a["id"], f"{a['headline']}: {a['title'][:40]}"))
     plan = plan_summary(rows)
     for meter, m in plan["meters"].items():
         if m["full_at"] and m["resets"] and m["full_at"] < m["resets"] and due("pace:" + meter):
