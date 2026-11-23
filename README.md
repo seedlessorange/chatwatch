@@ -41,6 +41,10 @@ A model can only be changed from inside the chat, by typing `/model sonnet` ther
 
 You can also get a table in the terminal with `python3 chatwatch.py`.
 
+## Settings that save usage
+
+[SETTINGS-ADVICE.md](SETTINGS-ADVICE.md) is a message to paste into a Claude Code chat. It has Claude check each setting against your version, back up your settings, apply six changes (Opus at medium effort, earlier compaction, a 1-hour cache and Sonnet for subagents, capped shell output, unused skills listed by name only) and measure the difference. The menu bar app shows how many are already in place and copies the message for you.
+
 ## Alerts
 
 At most one notification every 5 minutes, listing only what is new: a chat holding more than 250K tokens of context, a chat using 2% of your limit in an hour, a pace that reaches the limit before it resets, a Fable chat left idle for 30 minutes, or ten chats idle for three hours. The same alert for the same chat repeats at most every six hours. The thresholds are at the top of `chatwatch.py`.

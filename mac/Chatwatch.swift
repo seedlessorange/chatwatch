@@ -46,6 +46,8 @@ struct Chat: Codable, Identifiable {
 struct Waste: Codable { let share: Double; let steps: Int }
 struct Cause: Codable, Hashable { let kind: String; let pill: String; let text: String }
 struct Scoped: Codable { let label: String; let pct: Double; let resets: Double? }
+struct SettingCheck: Codable, Hashable { let label: String; let ok: Bool }
+struct SettingsInfo: Codable { let checks: [SettingCheck]; let advice: String }
 
 struct Meter: Codable {
     let label: String
@@ -80,6 +82,7 @@ struct Plan: Codable {
     let plan: String?
     let scoped: [Scoped]?
     let session_expected: Bool?
+    let settings: SettingsInfo?
 }
 struct Thresholds: Codable { let ctx: Int }
 struct Payload: Codable {
@@ -415,6 +418,42 @@ struct Num: View {
     }
 }
 
+/// How many of the usage settings in SETTINGS-ADVICE.md are in place, with the advice to copy.
+struct SettingsRow: View {
+    let info: SettingsInfo
+    @State private var copied = false
+    var done: Int { info.checks.filter { $0.ok }.count }
+    var all: Bool { done == info.checks.count }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Image(systemName: all ? "checkmark.seal.fill" : "slider.horizontal.3")
+                    .foregroundStyle(all ? Color.green : Color.orange)
+                Text(all ? "Usage settings all in place" : "\(done) of \(info.checks.count) usage settings in place")
+                    .font(.system(size: 12, weight: .medium))
+                Spacer()
+                Button(copied ? "Copied" : "Copy settings advice") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(info.advice, forType: .string)
+                    copied = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+                }
+                .buttonStyle(.borderless).font(.system(size: 11)).disabled(info.advice.isEmpty)
+            }
+            if !all {
+                ForEach(info.checks.filter { !$0.ok }, id: \.self) { c in
+                    Text("Missing: " + c.label).font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Text("Paste the advice into a Claude Code chat to apply them.")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.04)))
+    }
+}
+
 struct AttentionRow: View {
     @EnvironmentObject var model: Model
     let a: AlertItem
@@ -571,6 +610,7 @@ struct Panel: View {
                 Text(err).font(.callout).foregroundStyle(.secondary).padding(.vertical, 20)
             } else if let d = model.data {
                 MetersCard(plan: d.plan)
+                if let st = d.plan.settings { SettingsRow(info: st) }
                 content(d)
             } else {
                 ProgressView().frame(maxWidth: .infinity).padding()

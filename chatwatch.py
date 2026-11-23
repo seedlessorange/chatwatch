@@ -452,7 +452,8 @@ def plan_name():
     sub, tier = (o.get("subscriptionType") or "").lower(), (o.get("rateLimitTier") or "").lower()
     m = re.search(r"(\d+)x", tier)
     if sub == "max":
-        return f"Max {m.group(1)}x" if m else "Max"
+        # renamed on 30 Oct 2026: Max 20x is Ultra, Max 5x is Max
+        return "Ultra" if m and m.group(1) == "20" else "Max"
     return sub.capitalize()
 
 
@@ -663,7 +664,8 @@ def plan_summary(rows, force=False):
     out = {"why": s.get("why", ""), "read_at": s.get("at"), "unit": unit, "meters": {},
            "plan": s.get("plan", ""), "scoped": s.get("scoped") or [],
            # Pro plans always have a 5-hour window, even before it has started
-           "session_expected": s.get("plan", "") == "Pro" or s.get("five_hour") is not None}
+           "session_expected": s.get("plan", "") == "Pro" or s.get("five_hour") is not None,
+           "settings": settings_check()}
     for meter, (_, _, _, label) in METERS.items():
         m = s.get(meter)
         if not m:
@@ -684,6 +686,33 @@ def plan_summary(rows, force=False):
 
 
 # ---------------------------------------------------------------- advice
+def settings_check():
+    """Which of the usage settings in SETTINGS-ADVICE.md are in place, and the advice to paste."""
+    s = _read_json(os.path.join(CLAUDE, "settings.json")) or {}
+    env = s.get("env") or {}
+    efforts = [(v or {}).get("effortLevel") for k, v in (s.get("modelSettings") or {}).items() if "opus" in k]
+    try:
+        compact = int(s.get("autoCompactWindow") or 0)
+    except (TypeError, ValueError):
+        compact = 0
+    checks = [
+        ("Opus at medium effort", bool(efforts) and all(e in ("low", "medium") for e in efforts)),
+        ("Compact at 250K or less", 0 < compact <= 300_000),
+        ("Subagents keep a 1-hour cache", s.get("subagentPromptCacheTtl") == "1h"),
+        ("Unnamed subagents on Sonnet", str(env.get("CLAUDE_CODE_SUBAGENT_MODEL", "")).startswith(("sonnet", "haiku", "claude-sonnet", "claude-haiku"))),
+        ("Shell output capped", bool(env.get("BASH_MAX_OUTPUT_LENGTH"))),
+        ("Unused skills listed by name only", bool(s.get("skillOverrides"))),
+    ]
+    advice = ""
+    try:
+        with open(os.path.join(HERE, "SETTINGS-ADVICE.md"), encoding="utf-8") as f:
+            t = f.read()
+        advice = t.split("<!-- advice-start -->")[1].split("<!-- advice-end -->")[0].strip()
+    except (OSError, IndexError):
+        pass
+    return {"checks": [{"label": l, "ok": ok} for l, ok in checks], "advice": advice}
+
+
 def heavy(r):
     if r.get("hour_pct") is not None:
         return r["hour_pct"] >= HOUR_ALERT_PCT
