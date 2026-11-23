@@ -19,6 +19,9 @@ struct Job: Codable { let state: String?; let msg: String?; let path: String? }
 
 struct Chat: Codable, Identifiable {
     let pid: Int
+    let sid: String?
+    /// A link that brings this chat's VS Code tab forward; empty for chats in a terminal.
+    let jump: String?
     let title: String
     let folder: String
     let family: String
@@ -76,6 +79,8 @@ struct AlertItem: Codable, Identifiable {
     let cold_in_min: Int?
     let cold_cost_pct: Double?
     let cold_cost_usd: Double?
+    let sid: String?
+    let jump: String?
     /// For a cold alert: done, waiting, loose or unclear, read from the chat's last reply.
     let state: String?
     let closing: String?
@@ -174,6 +179,11 @@ final class Model: ObservableObject {
 
     func close(_ pid: Int, handoff: Bool) { post("api/close", ["pid": pid, "handoff": handoff]) }
     func snooze(_ id: String, hours: Double = 1) { post("api/snooze", ["id": id, "hours": hours]) }
+    /// Brings the chat's VS Code window and tab to the front (the server picks the window).
+    func jump(_ sid: String?) {
+        guard let s = sid, !s.isEmpty else { return }
+        post("api/jump", ["sid": s])
+    }
     func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
@@ -426,6 +436,18 @@ struct MetersCard: View {
 }
 
 /// A small capsule label that never wraps.
+extension View {
+    /// Click to open the chat, with a hand cursor; does nothing for chats without a link.
+    @ViewBuilder func jumpable(_ link: String?, _ action: @escaping () -> Void) -> some View {
+        if let l = link, !l.isEmpty {
+            self.contentShape(Rectangle()).onTapGesture(perform: action).help("Open this chat")
+                .onHover { inside in if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() } }
+        } else {
+            self
+        }
+    }
+}
+
 struct Tag: View {
     let text: String
     var color: Color = .secondary
@@ -578,6 +600,7 @@ struct AttentionRow: View {
             HStack(spacing: 6) {
                 Image(systemName: runaway ? "flame.fill" : cold ? "snowflake" : "drop.fill").font(.system(size: 11)).foregroundStyle(color)
                 Text(a.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    .jumpable(a.jump) { model.jump(a.sid) }
                 if let n = a.subs_active, n > 0 { Tag(text: "\(n) sub", color: .orange, filled: true) }
                 Spacer(minLength: 4)
                 Text(rate).font(.system(size: 13, weight: .semibold)).monospacedDigit().foregroundStyle(color)
@@ -658,6 +681,7 @@ struct ChatRow: View {
             HStack(alignment: .center, spacing: 8) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(c.title).font(.system(size: 13, weight: .medium)).lineLimit(1).truncationMode(.tail)
+                        .jumpable(c.jump) { model.jump(c.sid) }
                     HStack(spacing: 5) {
                         Tag(text: c.family.isEmpty ? "?" : c.family, color: c.family == "fable" ? .purple : .secondary)
                         if let n = c.subs_active, n > 0 { Tag(text: "\(n) sub", color: .orange, filled: true) }

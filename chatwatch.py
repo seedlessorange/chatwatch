@@ -450,6 +450,8 @@ def chats():
         rows.append({
             "state": state, "closing": closing[:300],
             "pid": s.get("pid"), "sid": sid, "cwd": cwd,
+            # VS Code's Claude extension opens (or brings forward) a chat from this link
+            "jump": f"vscode://anthropic.claude-code/open?session={sid}" if s.get("entrypoint") == "claude-vscode" else "",
             "folder": os.path.basename(cwd.rstrip("/\\")) or "~",
             "title": mt.title or (mt.last_prompt[:70] if mt.last_prompt else s.get("name") or sid[:8]),
             "model": model, "family": family(model) if model else "",
@@ -1155,6 +1157,20 @@ def write_handoff(row, timeout=600):
     return path
 
 
+def jump_to(sid):
+    """Bring a VS Code chat's tab to the front. The link goes to whichever VS Code window was
+    last in front, and a window that doesn't hold the chat opens an empty new one instead, so
+    first bring forward the window for the chat's folder (each window's chats share its folder)."""
+    row = next((r for r in chats() if r["sid"] == sid and r.get("jump")), None)
+    if not row:
+        return False
+    if MAC and os.path.isdir(row["cwd"]):
+        subprocess.run(["open", "-a", "Visual Studio Code", row["cwd"]], timeout=10)
+        time.sleep(1.5)
+    open_path(row["jump"])
+    return True
+
+
 def close_chat(pid, handoff=True):
     row = next((r for r in chats() if r["pid"] == pid), None)
     if not row:
@@ -1282,7 +1298,8 @@ def going_cold(r):
             "causes": pills, "state": r.get("state"), "closing": r.get("closing", ""),
             "fix": "handoff", "cold_in_min": left, "cold_cost_pct": r.get("cold_wake_pct"),
             "cold_cost_usd": r["cold_wake_usd"], "waste_pct_h": None, "waste_usd_h": 0.0, "share": 0.0,
-            "family": r["family"], "busy": False, "subs_active": r["subs_active"], "notify": not done}
+            "family": r["family"], "busy": False, "subs_active": r["subs_active"], "notify": not done,
+            "jump": r.get("jump", "")}
 
 
 def live_alerts(rows):
@@ -1441,6 +1458,10 @@ class Handler(BaseHTTPRequestHandler):
             jobs[pid] = {"state": "running", "msg": "Starting..."}
             threading.Thread(target=close_chat, args=(pid, bool(body.get("handoff", True))),
                              daemon=True).start()
+            return self._send(200, '{"ok":true}')
+        if self.path == "/api/jump":
+            sid = str(body.get("sid", ""))
+            threading.Thread(target=jump_to, args=(sid,), daemon=True).start()
             return self._send(200, '{"ok":true}')
         if self.path == "/api/snooze":
             snooze(str(body.get("id", "")), float(body.get("hours", 1)))
