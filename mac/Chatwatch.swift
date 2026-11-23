@@ -912,14 +912,28 @@ enum Main {
         sem.wait()
         model.data = payload
         if payload == nil { model.error = "The chatwatch service is not running." }
+        // Drawn through a real (offscreen) window rather than ImageRenderer, which
+        // leaves buttons and menus as yellow placeholders.
+        _ = NSApplication.shared
         for dark in [false, true] {
             let view = Panel(scrolls: false).environmentObject(model)
                 .background(Color(nsColor: .windowBackgroundColor))
-                .environment(\.colorScheme, dark ? .dark : .light)
-            let r = ImageRenderer(content: view)
-            r.scale = 2
-            if let img = r.nsImage, let tiff = img.tiffRepresentation,
-               let rep = NSBitmapImageRep(data: tiff), let png = rep.representation(using: .png, properties: [:]) {
+                .environment(\.controlActiveState, .key)   // prominent buttons in their active colour
+            let host = NSHostingView(rootView: view)
+            host.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+            host.setFrameSize(host.fittingSize)
+            let win = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+            win.appearance = host.appearance
+            win.contentView = host
+            host.layoutSubtreeIfNeeded()
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            let size = host.bounds.size
+            guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
+                    pixelsHigh: Int(size.height * 2), bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                    isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { continue }
+            rep.size = size
+            host.cacheDisplay(in: host.bounds, to: rep)
+            if let png = rep.representation(using: .png, properties: [:]) {
                 let out = dark ? path.replacingOccurrences(of: ".png", with: "-dark.png") : path
                 try? png.write(to: URL(fileURLWithPath: out))
             }

@@ -163,7 +163,7 @@ function render() {
           <div class="track"><i class="${cls}" style="width:${m.pct}%"></i><b style="left:${m.pct}%;width:${ahead}%"></b></div>
           ${m.pct_per_usd ? `<div class="line ${before ? "hot" : ""}">Last hour: ${pct(m.hour_pct)} (striped).
             ${m.full_at ? (before ? `At that pace you reach the limit ${when(m.full_at)}, before the reset.` : `At that pace it lasts until the reset.`) : ""}</div>
-            <div class="line">1% is about ${usd(1 / m.pct_per_usd)} at API rates, measured from the meter moving ${m.calib_points} points over ${m.calib_hours} h.</div>`
+            <div class="line">1% is about ${usd(1 / m.pct_per_usd)} in meter dollars, measured from the meter moving ${m.calib_points} points over ${m.calib_hours} h.</div>`
           : `<div class="line">Per-chat shares start once this meter has moved a few points (usually within a few hours of use).</div>`}
         </div>`; }).join("") + (p.scoped || []).map(sc => `<div class="meterblock">
           <div class="top"><div><span class="big">${sc.pct.toFixed(0)}%</span> of your ${esc(sc.label)} limit used</div>
@@ -172,7 +172,8 @@ function render() {
         </div>`).join("");
   const al = data.alerts || [];
   $("#alerts").innerHTML = al.length ? `<h2 style="font-size:16px;margin:18px 0 8px">Needs attention</h2>` + al.map(a => {
-    const rate = a.waste_pct_h != null ? pct(a.waste_pct_h) + " wasted per hour" : usd(a.waste_usd_h || 0) + " wasted per hour";
+    const rate = a.kind === "cold" ? (a.cold_cost_pct != null ? pct(a.cold_cost_pct) : usd(a.cold_cost_usd || 0)) + " to resume cold"
+      : a.waste_pct_h != null ? pct(a.waste_pct_h) + " wasted per hour" : usd(a.waste_usd_h || 0) + " wasted per hour";
     return `<div class="alert ${a.kind}">
       <div class="head"><span>${esc(a.title)}</span><span class="rate">${rate}</span></div>
       <div class="line" style="font-size:13.5px">${esc(a.text)}</div>

@@ -4,6 +4,24 @@ A small local page that shows how much of your Claude plan each open Claude Code
 
 Claude Code tells you how much of your weekly limit and your 5-hour window you have used, but not which chat used it. chatwatch reads the transcripts Claude Code already keeps on your computer and splits the meter between your chats. It runs in the background, sends a notification when something needs a look, and has a button that closes a chat after asking it to write a handoff note for a fresh one.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/menu-bar-dark.png">
+  <img src="docs/screenshots/menu-bar-light.png" width="380" align="right" alt="The menu bar panel: the weekly limit at 15% with a warning that this pace reaches it on Tuesday, two chats under Needs attention with Copy fix buttons, and a list of open chats with their share of the limit, waste and context size">
+</picture>
+
+On a Mac, chatwatch lives in the menu bar. In the panel on the right, one chat's cache expires in 8 minutes, and resuming it after that would cost 0.29% of the weekly limit, so it is worth a handoff now. Another chat is wasting 0.6% an hour because its subagents each re-read 180K of context. Copy fix puts a message on your clipboard to paste into that chat, such as narrower briefs for its subagents.
+
+Below that, every open chat is listed with its share of the limit in the last hour, how much of what it uses is waste, and how much context it holds.
+
+The same numbers are on a page in your browser, at http://127.0.0.1:7731, on Windows and Linux too. Both follow your system's light or dark setting. The chats in these pictures are made up.
+
+<br clear="right">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/page-dark.png">
+  <img src="docs/screenshots/page-light.png" alt="The browser page: weekly and Fable limits, two chats needing attention with Close + handoff buttons, totals for open chats and context, and one card per chat">
+</picture>
+
 ## Install
 
 You need Python 3.8 or newer and Claude Code signed in with a Claude subscription. Then, on a Mac:
